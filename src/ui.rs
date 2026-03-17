@@ -145,13 +145,6 @@ pub(super) fn command_template(keyword: &str) -> Option<String> {
             &today[..7]
         )),
         "reconcile" => Some("reconcile list --account \"ACCOUNT\"".to_string()),
-        "watchlist" => Some("watchlist add AAPL --label \"Apple\"".to_string()),
-        "quote" => Some("market quote AAPL".to_string()),
-        "news" => Some("market news AAPL --limit 5".to_string()),
-        "poly" => Some("poly market will-bitcoin-be-above-150k-on-december-31-2026".to_string()),
-        "polysearch" => Some("poly search fed cut --limit 8".to_string()),
-        "polymovers" => Some("poly movers --limit 8".to_string()),
-        "polywatch" => Some("poly watch add will-bitcoin-be-above-150k-on-december-31-2026 --label \"BTC 150k\"".to_string()),
         _ => None,
     }
 }
@@ -175,9 +168,6 @@ mod tests {
 
         let account = command_template("account").unwrap();
         assert!(account.contains("account add"));
-
-        let quote = command_template("quote").unwrap();
-        assert!(quote.contains("market quote"));
 
         assert!(command_template("unknown").is_none());
     }

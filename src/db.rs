@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Utc, Weekday as ChronoWeekday};
+use chrono::{Datelike, Duration, Local, NaiveDate, Weekday as ChronoWeekday};
 use directories::ProjectDirs;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
@@ -12,13 +12,12 @@ use crate::model::{
     Account, AccountKind, BalanceRecord, BalanceTrendPoint, BillCalendarItem, BudgetRecord,
     BudgetStatusRecord, Category, CategoryKind, CategorySpendingPoint, CsvImportPlan,
     CsvImportResult, ForecastDailyPoint, ForecastMonthlyPoint, ForecastSelection, ForecastSnapshot,
-    GoalStatusRecord, ImportedTransactionRow, MarketNewsFeed, MarketQuote, MarketRefreshKind,
-    MarketSettings, MonthlyCashFlowPoint, NewPlanningGoal, NewPlanningItem, NewPlanningScenario,
-    NewRecurringRule, NewTransaction, OccurrenceStatus, PlanningGoalKind, PlanningGoalRecord,
-    PlanningItemRecord, PlanningScenarioRecord, PolyMarket, PolyWatchItem, ReconciliationRecord,
-    RecurringCadence, RecurringOccurrenceRecord, RecurringRuleRecord, SummaryRecord,
-    TransactionFilters, TransactionKind, TransactionRecord, UpdatePlanningGoal, UpdatePlanningItem,
-    UpdatePlanningScenario, UpdateRecurringRule, UpdateTransaction, WatchlistItem, Weekday,
+    GoalStatusRecord, ImportedTransactionRow, MonthlyCashFlowPoint, NewPlanningGoal,
+    NewPlanningItem, NewPlanningScenario, NewRecurringRule, NewTransaction, OccurrenceStatus,
+    PlanningGoalKind, PlanningGoalRecord, PlanningItemRecord, PlanningScenarioRecord,
+    ReconciliationRecord, RecurringCadence, RecurringOccurrenceRecord, RecurringRuleRecord,
+    SummaryRecord, TransactionFilters, TransactionKind, TransactionRecord, UpdatePlanningGoal,
+    UpdatePlanningItem, UpdatePlanningScenario, UpdateRecurringRule, UpdateTransaction, Weekday,
     WeeklyBalancePoint,
 };
 
@@ -174,13 +173,6 @@ struct RecurringForecastOccurrence {
     category_name: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-struct MarketCacheRow {
-    payload_json: String,
-    fetched_at: String,
-    expires_at: String,
-}
-
 impl Db {
     pub fn open_existing(path: &Path) -> Result<Self, AppError> {
         if !path.exists() {
@@ -198,7 +190,6 @@ impl Db {
         db.migrate_if_needed()?;
         db.repair_schema_if_needed()?;
         db.ensure_indexes()?;
-        db.ensure_market_settings_row()?;
         Ok(db)
     }
 
@@ -236,7 +227,6 @@ impl Db {
             "INSERT INTO metadata (id, currency, schema_version, created_at) VALUES (1, ?1, ?2, ?3)",
             params![normalized_currency, CURRENT_SCHEMA_VERSION, now_timestamp()],
         )?;
-        self.ensure_market_settings_row()?;
         Ok(())
     }
 
@@ -246,100 +236,6 @@ impl Db {
                 row.get(0)
             })
             .map_err(Into::into)
-    }
-    pub fn market_settings(&self) -> Result<MarketSettings, AppError> {
-        self.ensure_market_settings_row()?;
-        self.conn
-            .query_row(
-                "SELECT quote_refresh_hours, news_refresh_hours, auto_refresh_quotes, auto_refresh_news, weekday_only, max_quote_cost_usd, updated_at
-                 FROM market_settings
-                 WHERE id = 1",
-                [],
-                |row| {
-                    Ok(MarketSettings {
-                        quote_refresh_hours: row.get(0)?,
-                        news_refresh_hours: row.get(1)?,
-                        auto_refresh_quotes: row.get::<_, i64>(2)? == 1,
-                        auto_refresh_news: row.get::<_, i64>(3)? == 1,
-                        weekday_only: row.get::<_, i64>(4)? == 1,
-                        max_quote_cost_usd: row.get(5)?,
-                        updated_at: row.get(6)?,
-                    })
-                },
-            )
-            .map_err(Into::into)
-    }
-    pub fn update_market_settings(
-        &self,
-        quote_refresh_hours: Option<i64>,
-        news_refresh_hours: Option<i64>,
-        auto_refresh_quotes: Option<bool>,
-        auto_refresh_news: Option<bool>,
-        weekday_only: Option<bool>,
-        max_quote_cost_usd: Option<f64>,
-    ) -> Result<MarketSettings, AppError> {
-        self.ensure_market_settings_row()?;
-        let current = self.market_settings()?;
-        let next_quote_hours = quote_refresh_hours.unwrap_or(current.quote_refresh_hours);
-        let next_news_hours = news_refresh_hours.unwrap_or(current.news_refresh_hours);
-        if next_quote_hours <= 0 || next_news_hours <= 0 {
-            return Err(AppError::Validation(
-                "market refresh intervals must be whole positive hours".to_string(),
-            ));
-        }
-        let next_max_quote_cost = max_quote_cost_usd.unwrap_or(current.max_quote_cost_usd);
-        if next_max_quote_cost < 0.0 {
-            return Err(AppError::Validation(
-                "max quote cost must be zero or greater".to_string(),
-            ));
-        }
-        self.conn.execute(
-            "UPDATE market_settings
-             SET quote_refresh_hours = ?1,
-                 news_refresh_hours = ?2,
-                 auto_refresh_quotes = ?3,
-                 auto_refresh_news = ?4,
-                 weekday_only = ?5,
-                 max_quote_cost_usd = ?6,
-                 updated_at = ?7
-             WHERE id = 1",
-            params![
-                next_quote_hours,
-                next_news_hours,
-                bool_to_sql(auto_refresh_quotes.unwrap_or(current.auto_refresh_quotes)),
-                bool_to_sql(auto_refresh_news.unwrap_or(current.auto_refresh_news)),
-                bool_to_sql(weekday_only.unwrap_or(current.weekday_only)),
-                next_max_quote_cost,
-                now_timestamp(),
-            ],
-        )?;
-        self.market_settings()
-    }
-    pub fn record_market_refresh_run(
-        &self,
-        ticker: &str,
-        kind: MarketRefreshKind,
-        provider: &str,
-        status: &str,
-        estimated_cost_usd: f64,
-        message: Option<&str>,
-        fetched_at: &str,
-    ) -> Result<(), AppError> {
-        self.conn.execute(
-            "INSERT INTO market_refresh_runs (
-                 ticker, kind, provider, status, estimated_cost_usd, message, fetched_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                normalize_ticker_symbol(ticker)?,
-                kind.as_label(),
-                provider,
-                status,
-                estimated_cost_usd,
-                message,
-                fetched_at,
-            ],
-        )?;
-        Ok(())
     }
 
     pub fn add_account(
@@ -3960,26 +3856,6 @@ impl Db {
             .map_err(Into::into)
     }
 
-    fn ensure_market_settings_row(&self) -> Result<(), AppError> {
-        let now = now_timestamp();
-        self.conn.execute(
-            "INSERT INTO market_settings (
-                 id,
-                 quote_refresh_hours,
-                 news_refresh_hours,
-                 auto_refresh_quotes,
-                 auto_refresh_news,
-                 weekday_only,
-                 max_quote_cost_usd,
-                 created_at,
-                 updated_at
-             ) VALUES (1, 4, 12, 1, 1, 1, 0.08, ?1, ?1)
-             ON CONFLICT(id) DO NOTHING",
-            params![now],
-        )?;
-        Ok(())
-    }
-
     fn backup_before_migration(&self, from_version: i64, to_version: i64) -> Result<(), AppError> {
         self.conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -4125,21 +4001,6 @@ impl Db {
     fn migrate_v4_to_v5(&mut self) -> Result<(), AppError> {
         self.conn.execute_batch(
             "BEGIN;
-             CREATE TABLE IF NOT EXISTS watchlist_items (
-                 id INTEGER PRIMARY KEY,
-                 ticker TEXT NOT NULL COLLATE NOCASE UNIQUE,
-                 label TEXT,
-                 added_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS market_cache (
-                 id INTEGER PRIMARY KEY,
-                 provider TEXT NOT NULL,
-                 kind TEXT NOT NULL CHECK (kind IN ('quote', 'news')),
-                 cache_key TEXT NOT NULL UNIQUE,
-                 payload_json TEXT NOT NULL,
-                 fetched_at TEXT NOT NULL,
-                 expires_at TEXT NOT NULL
-             );
              UPDATE metadata SET schema_version = 5 WHERE id = 1;
              COMMIT;",
         )?;
@@ -4150,31 +4011,9 @@ impl Db {
     fn migrate_v5_to_v6(&mut self) -> Result<(), AppError> {
         self.conn.execute_batch(
             "BEGIN;
-             CREATE TABLE IF NOT EXISTS market_settings (
-                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                 quote_refresh_hours INTEGER NOT NULL DEFAULT 4 CHECK (quote_refresh_hours > 0),
-                 news_refresh_hours INTEGER NOT NULL DEFAULT 12 CHECK (news_refresh_hours > 0),
-                 auto_refresh_quotes INTEGER NOT NULL DEFAULT 1 CHECK (auto_refresh_quotes IN (0, 1)),
-                 auto_refresh_news INTEGER NOT NULL DEFAULT 1 CHECK (auto_refresh_news IN (0, 1)),
-                 weekday_only INTEGER NOT NULL DEFAULT 1 CHECK (weekday_only IN (0, 1)),
-                 max_quote_cost_usd REAL NOT NULL DEFAULT 0.08 CHECK (max_quote_cost_usd >= 0),
-                 created_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS market_refresh_runs (
-                 id INTEGER PRIMARY KEY,
-                 ticker TEXT NOT NULL,
-                 kind TEXT NOT NULL CHECK (kind IN ('quotes', 'news', 'both')),
-                 provider TEXT NOT NULL,
-                 status TEXT NOT NULL,
-                 estimated_cost_usd REAL NOT NULL DEFAULT 0,
-                 message TEXT,
-                 fetched_at TEXT NOT NULL
-             );
              UPDATE metadata SET schema_version = 6 WHERE id = 1;
              COMMIT;",
         )?;
-        self.ensure_market_settings_row()?;
         self.ensure_indexes()?;
         Ok(())
     }
@@ -4182,20 +4021,6 @@ impl Db {
     fn migrate_v6_to_v7(&mut self) -> Result<(), AppError> {
         self.conn.execute_batch(
             "BEGIN;
-             CREATE TABLE IF NOT EXISTS poly_watchlist_items (
-                 id INTEGER PRIMARY KEY,
-                 slug TEXT NOT NULL COLLATE NOCASE UNIQUE,
-                 label TEXT,
-                 added_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS poly_cache (
-                 id INTEGER PRIMARY KEY,
-                 kind TEXT NOT NULL CHECK (kind IN ('market', 'movers')),
-                 cache_key TEXT NOT NULL UNIQUE,
-                 payload_json TEXT NOT NULL,
-                 fetched_at TEXT NOT NULL,
-                 expires_at TEXT NOT NULL
-             );
              UPDATE metadata SET schema_version = 7 WHERE id = 1;
              COMMIT;",
         )?;
@@ -4298,12 +4123,6 @@ impl Db {
              CREATE INDEX IF NOT EXISTS idx_recurring_occurrences_due_status ON recurring_occurrences(due_on, status);
              CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);
              CREATE INDEX IF NOT EXISTS idx_budgets_account ON budgets(account_id);
-             CREATE INDEX IF NOT EXISTS idx_watchlist_ticker ON watchlist_items(ticker);
-             CREATE INDEX IF NOT EXISTS idx_market_cache_lookup ON market_cache(provider, kind, cache_key);
-             CREATE INDEX IF NOT EXISTS idx_market_refresh_runs_ticker_kind ON market_refresh_runs(ticker, kind, fetched_at DESC);
-             CREATE INDEX IF NOT EXISTS idx_market_refresh_runs_fetched ON market_refresh_runs(fetched_at DESC);
-             CREATE INDEX IF NOT EXISTS idx_poly_watchlist_slug ON poly_watchlist_items(slug);
-             CREATE INDEX IF NOT EXISTS idx_poly_cache_lookup ON poly_cache(kind, cache_key);
              CREATE INDEX IF NOT EXISTS idx_planning_items_due ON planning_items(due_on);
              CREATE INDEX IF NOT EXISTS idx_planning_items_scenario_due ON planning_items(scenario_id, due_on);
              CREATE INDEX IF NOT EXISTS idx_planning_goals_account ON planning_goals(account_id);
@@ -5009,319 +4828,6 @@ impl Db {
 
         Ok(())
     }
-    pub fn add_watchlist_item(&self, ticker: &str, label: Option<&str>) -> Result<i64, AppError> {
-        let ticker = normalize_ticker_symbol(ticker)?;
-        let label = label
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
-        match self.conn.execute(
-            "INSERT INTO watchlist_items (ticker, label, added_at) VALUES (?1, ?2, ?3)",
-            params![ticker, label, now_timestamp()],
-        ) {
-            Ok(_) => Ok(self.conn.last_insert_rowid()),
-            Err(error) if is_unique_constraint(&error) => {
-                Err(AppError::duplicate("ticker", ticker.as_str()))
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    pub fn list_watchlist_items(&self) -> Result<Vec<WatchlistItem>, AppError> {
-        let mut statement = self.conn.prepare(
-            "SELECT id, ticker, label, added_at FROM watchlist_items ORDER BY ticker COLLATE NOCASE",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok(WatchlistItem {
-                id: row.get(0)?,
-                ticker: row.get(1)?,
-                label: row.get(2)?,
-                added_at: row.get(3)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    pub fn remove_watchlist_item(&self, ticker: &str) -> Result<(), AppError> {
-        let ticker = normalize_ticker_symbol(ticker)?;
-        let changed = self.conn.execute(
-            "DELETE FROM watchlist_items WHERE ticker = ?1",
-            params![ticker],
-        )?;
-        if changed == 0 {
-            return Err(AppError::NotFound(format!(
-                "ticker `{ticker}` was not found"
-            )));
-        }
-        Ok(())
-    }
-
-    pub fn single_watchlist_ticker(&self) -> Result<String, AppError> {
-        let items = self.list_watchlist_items()?;
-        match items.len() {
-            0 => Err(AppError::Validation(
-                "ticker is required because the watchlist is empty".to_string(),
-            )),
-            1 => Ok(items[0].ticker.clone()),
-            _ => Err(AppError::Validation(
-                "ticker is required when the watchlist has multiple items".to_string(),
-            )),
-        }
-    }
-
-    pub fn cached_quote(&self, ticker: &str) -> Result<Option<MarketQuote>, AppError> {
-        let ticker = normalize_ticker_symbol(ticker)?;
-        let key = format!("quote:{ticker}");
-        let Some(cache) = self.load_market_cache("valyu", "quote", &key)? else {
-            return Ok(None);
-        };
-        let mut quote = serde_json::from_str::<MarketQuote>(&cache.payload_json)?;
-        quote.fetched_at = cache.fetched_at;
-        quote.stale = cache_is_stale(&cache.expires_at)?;
-        Ok(Some(quote))
-    }
-
-    pub fn cached_news(&self, ticker: &str) -> Result<Option<MarketNewsFeed>, AppError> {
-        let ticker = normalize_ticker_symbol(ticker)?;
-        let key = format!("news:{ticker}");
-        let Some(cache) = self.load_market_cache("tavily", "news", &key)? else {
-            return Ok(None);
-        };
-        let mut feed = serde_json::from_str::<MarketNewsFeed>(&cache.payload_json)?;
-        feed.fetched_at = cache.fetched_at;
-        feed.stale = cache_is_stale(&cache.expires_at)?;
-        Ok(Some(feed))
-    }
-
-    pub fn store_quote_cache(&self, quote: &MarketQuote, expires_at: &str) -> Result<(), AppError> {
-        self.upsert_market_cache(
-            "valyu",
-            "quote",
-            &format!("quote:{}", normalize_ticker_symbol(&quote.ticker)?),
-            &serde_json::to_string(quote)?,
-            &quote.fetched_at,
-            expires_at,
-        )
-    }
-
-    pub fn store_news_cache(
-        &self,
-        feed: &MarketNewsFeed,
-        expires_at: &str,
-    ) -> Result<(), AppError> {
-        self.upsert_market_cache(
-            "tavily",
-            "news",
-            &format!("news:{}", normalize_ticker_symbol(&feed.ticker)?),
-            &serde_json::to_string(feed)?,
-            &feed.fetched_at,
-            expires_at,
-        )
-    }
-
-    fn load_market_cache(
-        &self,
-        provider: &str,
-        kind: &str,
-        cache_key: &str,
-    ) -> Result<Option<MarketCacheRow>, AppError> {
-        let mut statement = self.conn.prepare(
-            "SELECT payload_json, fetched_at, expires_at
-             FROM market_cache
-             WHERE provider = ?1 AND kind = ?2 AND cache_key = ?3",
-        )?;
-        statement
-            .query_row(params![provider, kind, cache_key], |row| {
-                Ok(MarketCacheRow {
-                    payload_json: row.get(0)?,
-                    fetched_at: row.get(1)?,
-                    expires_at: row.get(2)?,
-                })
-            })
-            .optional()
-            .map_err(Into::into)
-    }
-
-    fn upsert_market_cache(
-        &self,
-        provider: &str,
-        kind: &str,
-        cache_key: &str,
-        payload_json: &str,
-        fetched_at: &str,
-        expires_at: &str,
-    ) -> Result<(), AppError> {
-        self.conn.execute(
-            "INSERT INTO market_cache (provider, kind, cache_key, payload_json, fetched_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(cache_key) DO UPDATE SET
-                 provider = excluded.provider,
-                 kind = excluded.kind,
-                 payload_json = excluded.payload_json,
-                 fetched_at = excluded.fetched_at,
-                 expires_at = excluded.expires_at",
-            params![provider, kind, cache_key, payload_json, fetched_at, expires_at],
-        )?;
-        Ok(())
-    }
-}
-
-impl Db {
-    pub fn add_poly_watch_item(&self, slug: &str, label: Option<&str>) -> Result<i64, AppError> {
-        let slug = normalize_poly_slug_symbol(slug)?;
-        let label = label
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
-        match self.conn.execute(
-            "INSERT INTO poly_watchlist_items (slug, label, added_at) VALUES (?1, ?2, ?3)",
-            params![slug, label, now_timestamp()],
-        ) {
-            Ok(_) => Ok(self.conn.last_insert_rowid()),
-            Err(error) if is_unique_constraint(&error) => {
-                Err(AppError::duplicate("Polymarket slug", slug.as_str()))
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    pub fn list_poly_watch_items(&self) -> Result<Vec<PolyWatchItem>, AppError> {
-        let mut statement = self.conn.prepare(
-            "SELECT id, slug, label, added_at FROM poly_watchlist_items ORDER BY slug COLLATE NOCASE",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok(PolyWatchItem {
-                id: row.get(0)?,
-                slug: row.get(1)?,
-                label: row.get(2)?,
-                added_at: row.get(3)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    pub fn remove_poly_watch_item(&self, slug: &str) -> Result<(), AppError> {
-        let slug = normalize_poly_slug_symbol(slug)?;
-        let changed = self.conn.execute(
-            "DELETE FROM poly_watchlist_items WHERE slug = ?1",
-            params![slug],
-        )?;
-        if changed == 0 {
-            return Err(AppError::NotFound(format!(
-                "Polymarket slug `{slug}` was not found"
-            )));
-        }
-        Ok(())
-    }
-
-    pub fn single_poly_watch_slug(&self) -> Result<String, AppError> {
-        let items = self.list_poly_watch_items()?;
-        match items.len() {
-            0 => Err(AppError::Validation(
-                "slug is required because the Polymarket watchlist is empty".to_string(),
-            )),
-            1 => Ok(items[0].slug.clone()),
-            _ => Err(AppError::Validation(
-                "slug is required when the Polymarket watchlist has multiple items".to_string(),
-            )),
-        }
-    }
-
-    pub fn cached_poly_market(&self, slug: &str) -> Result<Option<PolyMarket>, AppError> {
-        let slug = normalize_poly_slug_symbol(slug)?;
-        let key = format!("market:{slug}");
-        let Some(cache) = self.load_poly_cache("market", &key)? else {
-            return Ok(None);
-        };
-        let mut market = serde_json::from_str::<PolyMarket>(&cache.payload_json)?;
-        market.fetched_at = cache.fetched_at;
-        market.stale = cache_is_stale(&cache.expires_at)?;
-        Ok(Some(market))
-    }
-
-    pub fn cached_poly_movers(&self) -> Result<Option<Vec<PolyMarket>>, AppError> {
-        let Some(cache) = self.load_poly_cache("movers", "movers")? else {
-            return Ok(None);
-        };
-        let mut markets = serde_json::from_str::<Vec<PolyMarket>>(&cache.payload_json)?;
-        let stale = cache_is_stale(&cache.expires_at)?;
-        for market in &mut markets {
-            market.fetched_at = cache.fetched_at.clone();
-            market.stale = stale;
-        }
-        Ok(Some(markets))
-    }
-
-    pub fn store_poly_market(&self, market: &PolyMarket, expires_at: &str) -> Result<(), AppError> {
-        self.upsert_poly_cache(
-            "market",
-            &format!("market:{}", normalize_poly_slug_symbol(&market.slug)?),
-            &serde_json::to_string(market)?,
-            &market.fetched_at,
-            expires_at,
-        )
-    }
-
-    pub fn store_poly_movers(
-        &self,
-        markets: &[PolyMarket],
-        expires_at: &str,
-    ) -> Result<(), AppError> {
-        let fetched_at = markets
-            .first()
-            .map(|market| market.fetched_at.clone())
-            .unwrap_or_else(now_timestamp);
-        self.upsert_poly_cache(
-            "movers",
-            "movers",
-            &serde_json::to_string(markets)?,
-            &fetched_at,
-            expires_at,
-        )
-    }
-
-    fn load_poly_cache(
-        &self,
-        kind: &str,
-        cache_key: &str,
-    ) -> Result<Option<MarketCacheRow>, AppError> {
-        let mut statement = self.conn.prepare(
-            "SELECT payload_json, fetched_at, expires_at
-             FROM poly_cache
-             WHERE kind = ?1 AND cache_key = ?2",
-        )?;
-        statement
-            .query_row(params![kind, cache_key], |row| {
-                Ok(MarketCacheRow {
-                    payload_json: row.get(0)?,
-                    fetched_at: row.get(1)?,
-                    expires_at: row.get(2)?,
-                })
-            })
-            .optional()
-            .map_err(Into::into)
-    }
-
-    fn upsert_poly_cache(
-        &self,
-        kind: &str,
-        cache_key: &str,
-        payload_json: &str,
-        fetched_at: &str,
-        expires_at: &str,
-    ) -> Result<(), AppError> {
-        self.conn.execute(
-            "INSERT INTO poly_cache (kind, cache_key, payload_json, fetched_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(cache_key) DO UPDATE SET
-                 kind = excluded.kind,
-                 payload_json = excluded.payload_json,
-                 fetched_at = excluded.fetched_at,
-                 expires_at = excluded.expires_at",
-            params![kind, cache_key, payload_json, fetched_at, expires_at],
-        )?;
-        Ok(())
-    }
 }
 pub fn resolve_db_path(explicit: Option<PathBuf>) -> Result<PathBuf, AppError> {
     if let Some(path) = explicit {
@@ -5452,62 +4958,6 @@ CREATE TABLE IF NOT EXISTS budgets (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(month, category_id)
-);
-
-CREATE TABLE IF NOT EXISTS watchlist_items (
-    id INTEGER PRIMARY KEY,
-    ticker TEXT NOT NULL COLLATE NOCASE UNIQUE,
-    label TEXT,
-    added_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS market_cache (
-    id INTEGER PRIMARY KEY,
-    provider TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('quote', 'news')),
-    cache_key TEXT NOT NULL UNIQUE,
-    payload_json TEXT NOT NULL,
-    fetched_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS market_settings (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    quote_refresh_hours INTEGER NOT NULL DEFAULT 4 CHECK (quote_refresh_hours > 0),
-    news_refresh_hours INTEGER NOT NULL DEFAULT 12 CHECK (news_refresh_hours > 0),
-    auto_refresh_quotes INTEGER NOT NULL DEFAULT 1 CHECK (auto_refresh_quotes IN (0, 1)),
-    auto_refresh_news INTEGER NOT NULL DEFAULT 1 CHECK (auto_refresh_news IN (0, 1)),
-    weekday_only INTEGER NOT NULL DEFAULT 1 CHECK (weekday_only IN (0, 1)),
-    max_quote_cost_usd REAL NOT NULL DEFAULT 0.08 CHECK (max_quote_cost_usd >= 0),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS market_refresh_runs (
-    id INTEGER PRIMARY KEY,
-    ticker TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('quotes', 'news', 'both')),
-    provider TEXT NOT NULL,
-    status TEXT NOT NULL,
-    estimated_cost_usd REAL NOT NULL DEFAULT 0,
-    message TEXT,
-    fetched_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS poly_watchlist_items (
-    id INTEGER PRIMARY KEY,
-    slug TEXT NOT NULL COLLATE NOCASE UNIQUE,
-    label TEXT,
-    added_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS poly_cache (
-    id INTEGER PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('market', 'movers')),
-    cache_key TEXT NOT NULL UNIQUE,
-    payload_json TEXT NOT NULL,
-    fetched_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS planning_scenarios (
@@ -5698,47 +5148,6 @@ fn parse_import_kind(value: &str) -> Result<TransactionKind, AppError> {
         ))),
     }
 }
-
-fn normalize_ticker_symbol(raw: &str) -> Result<String, AppError> {
-    let normalized = raw.trim().to_ascii_uppercase();
-    let is_valid = !normalized.is_empty()
-        && normalized.len() <= 15
-        && normalized
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-');
-    if !is_valid {
-        return Err(AppError::Validation(
-            "ticker must use only letters, numbers, '.' or '-'".to_string(),
-        ));
-    }
-    Ok(normalized)
-}
-
-fn normalize_poly_slug_symbol(raw: &str) -> Result<String, AppError> {
-    let trimmed = raw.trim();
-    let slug = if let Some((_, tail)) = trimmed.split_once("/event/") {
-        tail.split(['?', '#', '/']).next().unwrap_or(tail)
-    } else {
-        trimmed
-    };
-    let normalized = slug.trim().trim_matches('/').to_ascii_lowercase();
-    let is_valid = !normalized.is_empty()
-        && normalized.len() <= 140
-        && normalized
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-');
-    if !is_valid {
-        return Err(AppError::Validation(
-            "Polymarket slug must use only letters, numbers, and '-'".to_string(),
-        ));
-    }
-    Ok(normalized)
-}
-
-fn cache_is_stale(expires_at: &str) -> Result<bool, AppError> {
-    let expires = DateTime::parse_from_rfc3339(expires_at)?.with_timezone(&Utc);
-    Ok(expires <= Utc::now())
-}
 fn normalize_currency_code(currency: &str) -> Result<String, AppError> {
     let normalized = currency.trim().to_ascii_uppercase();
     let is_valid = normalized.len() == 3 && normalized.chars().all(|ch| ch.is_ascii_uppercase());
@@ -5766,14 +5175,6 @@ fn normalize_optional_text(value: &Option<String>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-}
-
-fn bool_to_sql(value: bool) -> i64 {
-    if value {
-        1
-    } else {
-        0
-    }
 }
 
 fn resolve_optional_patch(

@@ -2,10 +2,8 @@ mod amount;
 mod cli;
 mod db;
 mod error;
-mod market;
 mod model;
 mod output;
-mod poly;
 mod shell;
 mod theme;
 mod ui;
@@ -24,28 +22,21 @@ use crate::cli::{
     CategoryCommand, CategoryDeleteArgs, CategoryEditArgs, Cli, Command, ExportCommand,
     ExportCsvArgs, ForecastBillsArgs, ForecastCommand, ForecastShowArgs, GoalAddArgs, GoalCommand,
     GoalDeleteArgs, GoalEditArgs, GoalListArgs, ImportCommand, ImportCsvArgs, InitArgs,
-    MarketAutoRefreshArgs, MarketBriefArgs, MarketCommand, MarketNewsArgs, MarketQuoteArgs,
-    MarketSettingsCommand, MarketSettingsSetArgs, MarketSettingsShowArgs, PlanCommand,
-    PlanItemAddArgs, PlanItemCommand, PlanItemEditArgs, PlanItemIdArgs, PlanItemListArgs,
-    PolyBriefArgs, PolyCommand, PolyMarketArgs, PolyMoversArgs, PolySearchArgs, PolyWatchAddArgs,
-    PolyWatchCommand, PolyWatchListArgs, PolyWatchRefreshArgs, PolyWatchRemoveArgs,
-    ReconcileCommand, ReconcileDeleteArgs, ReconcileListArgs, ReconcileStartArgs, RecurringAddArgs,
-    RecurringCommand, RecurringEditArgs, RecurringIdArgs, RecurringListArgs, RecurringRunArgs,
-    ScenarioAddArgs, ScenarioCommand, ScenarioDeleteArgs, ScenarioEditArgs, ScenarioListArgs,
-    SummaryCommand, SummaryMonthArgs, SummaryRangeArgs, TransactionAddArgs, TransactionCommand,
-    TransactionDeleteArgs, TransactionEditArgs, TransactionListArgs, TransactionRestoreArgs,
-    WatchlistAddArgs, WatchlistCommand, WatchlistListArgs, WatchlistRefreshArgs,
-    WatchlistRemoveArgs,
+    PlanCommand, PlanItemAddArgs, PlanItemCommand, PlanItemEditArgs, PlanItemIdArgs,
+    PlanItemListArgs, ReconcileCommand, ReconcileDeleteArgs, ReconcileListArgs, ReconcileStartArgs,
+    RecurringAddArgs, RecurringCommand, RecurringEditArgs, RecurringIdArgs, RecurringListArgs,
+    RecurringRunArgs, ScenarioAddArgs, ScenarioCommand, ScenarioDeleteArgs, ScenarioEditArgs,
+    ScenarioListArgs, SummaryCommand, SummaryMonthArgs, SummaryRangeArgs, TransactionAddArgs,
+    TransactionCommand, TransactionDeleteArgs, TransactionEditArgs, TransactionListArgs,
+    TransactionRestoreArgs,
 };
 use crate::db::{resolve_db_path, Db};
 pub use crate::error::AppError;
-use crate::market::MarketService;
 use crate::model::{
     CsvImportPlan, ExportKind, NewPlanningGoal, NewPlanningItem, NewPlanningScenario,
     NewRecurringRule, NewTransaction, TransactionFilters, UpdatePlanningGoal, UpdatePlanningItem,
     UpdatePlanningScenario, UpdateRecurringRule, UpdateTransaction,
 };
-use crate::poly::PolyService;
 
 pub fn run_app<I, T>(
     args: I,
@@ -131,15 +122,6 @@ fn run_command(db_path: &Path, command: Command, stdout: &mut dyn Write) -> Resu
         }
         Command::Recurring { command } => {
             with_existing_db(db_path, |db| handle_recurring(db, command, stdout))
-        }
-        Command::Watchlist { command } => {
-            with_existing_db(db_path, |db| handle_watchlist(db, command, stdout))
-        }
-        Command::Market { command } => {
-            with_existing_db(db_path, |db| handle_market(db, command, stdout))
-        }
-        Command::Poly { command } => {
-            with_existing_db(db_path, |db| handle_poly(db, command, stdout))
         }
     }
 }
@@ -1242,201 +1224,6 @@ fn handle_recurring(
             )?;
             Ok(())
         }
-    }
-}
-
-fn handle_watchlist(
-    db: Db,
-    command: WatchlistCommand,
-    stdout: &mut dyn Write,
-) -> Result<(), AppError> {
-    let service = MarketService::from_env();
-    match command {
-        WatchlistCommand::Add(WatchlistAddArgs { ticker, label }) => {
-            let watchlist_id = service.add_watchlist(&db, &ticker, label.as_deref())?;
-            writeln!(
-                stdout,
-                "{}",
-                output::success_text(&format!(
-                    "Added {} to watchlist as item {}.",
-                    ticker.trim().to_ascii_uppercase(),
-                    watchlist_id
-                ))
-            )?;
-            Ok(())
-        }
-        WatchlistCommand::List(WatchlistListArgs { json }) => {
-            let watchlist = service.list_watchlist(&db)?;
-            output::write_watchlist(stdout, &watchlist, json)
-        }
-        WatchlistCommand::Remove(WatchlistRemoveArgs { ticker }) => {
-            service.remove_watchlist(&db, &ticker)?;
-            writeln!(
-                stdout,
-                "{}",
-                output::warning_text(&format!(
-                    "Removed {} from watchlist.",
-                    ticker.trim().to_ascii_uppercase()
-                ))
-            )?;
-            Ok(())
-        }
-        WatchlistCommand::Refresh(WatchlistRefreshArgs {
-            ticker,
-            all,
-            kind,
-            json,
-        }) => {
-            if all && ticker.is_some() {
-                return Err(AppError::Validation(
-                    "watchlist refresh accepts either a ticker or --all, not both".to_string(),
-                ));
-            }
-            let summary = service.refresh_watchlist(&db, ticker.as_deref(), all, kind)?;
-            output::write_market_refresh_summary(stdout, &summary, json)
-        }
-    }
-}
-
-fn handle_market(db: Db, command: MarketCommand, stdout: &mut dyn Write) -> Result<(), AppError> {
-    let service = MarketService::from_env();
-    match command {
-        MarketCommand::Quote(MarketQuoteArgs {
-            ticker,
-            cached_only,
-            json,
-        }) => {
-            let quote = service.quote(&db, &ticker, cached_only)?;
-            output::write_market_quote(stdout, &quote, json)
-        }
-        MarketCommand::Brief(MarketBriefArgs {
-            ticker,
-            limit,
-            cached_only,
-            json,
-        }) => {
-            let brief = service.brief(&db, ticker.as_deref(), limit, cached_only)?;
-            output::write_market_brief(stdout, &brief, json)
-        }
-        MarketCommand::News(MarketNewsArgs {
-            ticker,
-            limit,
-            cached_only,
-            json,
-        }) => {
-            let feed = service.news(&db, ticker.as_deref(), limit, cached_only)?;
-            output::write_market_news(stdout, &feed, json)
-        }
-        MarketCommand::AutoRefresh(MarketAutoRefreshArgs { kind, json }) => {
-            let summary = service.auto_refresh_watchlist(&db, kind)?;
-            output::write_market_refresh_summary(stdout, &summary, json)
-        }
-        MarketCommand::Settings { command } => match command {
-            MarketSettingsCommand::Show(MarketSettingsShowArgs { json }) => {
-                let settings = service.market_settings(&db)?;
-                output::write_market_settings(stdout, &settings, json)
-            }
-            MarketSettingsCommand::Set(MarketSettingsSetArgs {
-                quote_hours,
-                news_hours,
-                auto_quotes,
-                auto_news,
-                weekday_only,
-                max_quote_cost,
-                json,
-            }) => {
-                if quote_hours.is_none()
-                    && news_hours.is_none()
-                    && auto_quotes.is_none()
-                    && auto_news.is_none()
-                    && weekday_only.is_none()
-                    && max_quote_cost.is_none()
-                {
-                    return Err(AppError::Validation(
-                        "market settings set requires at least one option to update".to_string(),
-                    ));
-                }
-                let settings = service.update_market_settings(
-                    &db,
-                    quote_hours,
-                    news_hours,
-                    auto_quotes,
-                    auto_news,
-                    weekday_only,
-                    max_quote_cost,
-                )?;
-                output::write_market_settings(stdout, &settings, json)
-            }
-        },
-    }
-}
-
-fn handle_poly(db: Db, command: PolyCommand, stdout: &mut dyn Write) -> Result<(), AppError> {
-    let service = PolyService::from_env();
-    match command {
-        PolyCommand::Search(PolySearchArgs { query, limit, json }) => {
-            let results = service.search(&query, limit)?;
-            output::write_poly_search_results(stdout, &results, json)
-        }
-        PolyCommand::Market(PolyMarketArgs {
-            slug,
-            cached_only,
-            json,
-        }) => {
-            let market = service.market(&db, &slug, cached_only)?;
-            output::write_poly_market(stdout, &market, json)
-        }
-        PolyCommand::Brief(PolyBriefArgs {
-            slug,
-            cached_only,
-            json,
-        }) => {
-            let brief = service.brief(&db, slug.as_deref(), cached_only)?;
-            output::write_poly_brief(stdout, &brief, json)
-        }
-        PolyCommand::Movers(PolyMoversArgs {
-            limit,
-            cached_only,
-            json,
-        }) => {
-            let movers = service.movers(&db, limit, cached_only)?;
-            output::write_poly_movers(stdout, &movers, json)
-        }
-        PolyCommand::Watch { command } => match command {
-            PolyWatchCommand::Add(PolyWatchAddArgs { slug, label }) => {
-                let watch_id = service.add_watchlist(&db, &slug, label.as_deref())?;
-                writeln!(
-                    stdout,
-                    "{}",
-                    output::success_text(&format!(
-                        "Added {} to Polymarket watchlist as item {}.",
-                        slug.trim().to_ascii_lowercase(),
-                        watch_id
-                    ))
-                )?;
-                Ok(())
-            }
-            PolyWatchCommand::List(PolyWatchListArgs { json }) => {
-                let watchlist = service.list_watchlist(&db)?;
-                output::write_poly_watchlist(stdout, &watchlist, json)
-            }
-            PolyWatchCommand::Remove(PolyWatchRemoveArgs { slug }) => {
-                service.remove_watchlist(&db, &slug)?;
-                writeln!(
-                    stdout,
-                    "{}",
-                    output::warning_text(&format!(
-                        "Removed {} from the Polymarket watchlist.",
-                        slug.trim().to_ascii_lowercase()
-                    ))
-                )?;
-                Ok(())
-            }
-            PolyWatchCommand::Refresh(PolyWatchRefreshArgs { slug, all, json }) => {
-                let summary = service.refresh_watchlist(&db, slug.as_deref(), all)?;
-                output::write_poly_refresh_summary(stdout, &summary, json)
-            }
-        },
     }
 }
 fn resolve_export_range(

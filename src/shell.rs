@@ -11,11 +11,11 @@ pub fn run_interactive_shell(db_path: PathBuf, stdout: &mut dyn Write) -> Result
     writeln!(stdout, "Database: {}", db_path.display())?;
     writeln!(
         stdout,
-        "Shortcuts: init, account, category, income, expense, transfer, balance, transactions, summary, budget, reconcile, recurring, watchlist, quote, brief, news, exit"
+        "Shortcuts: init, account, category, income, expense, transfer, balance, transactions, summary, budget, reconcile, recurring, exit"
     )?;
     writeln!(
         stdout,
-        "You can also type full commands like `tx list --account Checking`, `recurring list`, or `market quote AAPL`."
+        "You can also type full commands like `tx list --account Checking`, `recurring list`, or `budget status 2026-03`."
     )?;
 
     let stdin = io::stdin();
@@ -61,10 +61,6 @@ pub fn run_interactive_shell(db_path: PathBuf, stdout: &mut dyn Write) -> Result
             "reconcile" | "reconcile start" => prompt_reconcile(&db_path, stdout),
             "recurring" | "recurring add" => prompt_recurring(&db_path, stdout),
             "recurring run" => prompt_recurring_run(&db_path, stdout),
-            "watchlist" | "watchlist add" => prompt_watchlist_add(&db_path, stdout),
-            "quote" | "market quote" => prompt_market_quote(&db_path, stdout),
-            "brief" | "market brief" => prompt_market_brief(&db_path, stdout),
-            "news" | "market news" => prompt_market_news(&db_path, stdout),
             _ => execute_raw_cli(&db_path, input, stdout),
         };
 
@@ -94,10 +90,6 @@ fn print_help(stdout: &mut dyn Write) -> Result<(), AppError> {
     writeln!(stdout, "  reconcile       Guided reconciliation flow")?;
     writeln!(stdout, "  recurring       Guided recurring rule creation")?;
     writeln!(stdout, "  recurring run   Post due recurring transactions")?;
-    writeln!(stdout, "  watchlist       Guided watchlist ticker creation")?;
-    writeln!(stdout, "  quote           Guided market quote lookup")?;
-    writeln!(stdout, "  brief           Guided market brief lookup")?;
-    writeln!(stdout, "  news            Guided raw market news lookup")?;
     writeln!(stdout, "  help            Show this help")?;
     writeln!(stdout, "  exit            Close the app")?;
     writeln!(stdout)?;
@@ -105,9 +97,6 @@ fn print_help(stdout: &mut dyn Write) -> Result<(), AppError> {
     writeln!(stdout, "  tx edit 3 --note \"fixed note\"")?;
     writeln!(stdout, "  reconcile list")?;
     writeln!(stdout, "  recurring list")?;
-    writeln!(stdout, "  watchlist refresh --all")?;
-    writeln!(stdout, "  market brief AAPL")?;
-    writeln!(stdout, "  market news AAPL --limit 5")?;
     writeln!(stdout, "  budget status 2026-03")?;
     Ok(())
 }
@@ -419,53 +408,6 @@ fn prompt_recurring_run(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(),
     let mut args = vec!["recurring".to_string(), "run".to_string()];
     if let Some(value) = through {
         args.push("--through".to_string());
-        args.push(value);
-    }
-    execute_cli(db_path, args, stdout)
-}
-
-fn prompt_watchlist_add(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
-    let ticker = prompt_required(stdout, "Ticker", None)?;
-    let label = prompt_optional(stdout, "Label", None)?;
-    let mut args = vec!["watchlist".to_string(), "add".to_string(), ticker];
-    if let Some(value) = label {
-        args.push("--label".to_string());
-        args.push(value);
-    }
-    execute_cli(db_path, args, stdout)
-}
-
-fn prompt_market_quote(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
-    let ticker = prompt_required(stdout, "Ticker", None)?;
-    execute_cli(
-        db_path,
-        vec!["market".to_string(), "quote".to_string(), ticker],
-        stdout,
-    )
-}
-
-fn prompt_market_brief(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
-    let ticker = prompt_optional(stdout, "Ticker (blank uses single watchlist item)", None)?;
-    let limit = prompt_optional(stdout, "Limit", Some("5"))?;
-    let mut args = vec!["market".to_string(), "brief".to_string()];
-    if let Some(value) = ticker {
-        args.push(value);
-    }
-    if let Some(value) = limit {
-        args.push("--limit".to_string());
-        args.push(value);
-    }
-    execute_cli(db_path, args, stdout)
-}
-fn prompt_market_news(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
-    let ticker = prompt_optional(stdout, "Ticker (blank uses single watchlist item)", None)?;
-    let limit = prompt_optional(stdout, "Limit", Some("5"))?;
-    let mut args = vec!["market".to_string(), "news".to_string()];
-    if let Some(value) = ticker {
-        args.push(value);
-    }
-    if let Some(value) = limit {
-        args.push("--limit".to_string());
         args.push(value);
     }
     execute_cli(db_path, args, stdout)

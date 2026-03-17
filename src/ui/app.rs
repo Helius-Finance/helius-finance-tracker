@@ -11,19 +11,15 @@ use ratatui::Terminal;
 use crate::amount::{parse_amount_to_cents, parse_balance_to_cents};
 use crate::db::Db;
 use crate::error::AppError;
-use crate::market::MarketService;
 use crate::model::{
     Account, BalanceRecord, BalanceTrendPoint, BudgetStatusRecord, Category, CategorySpendingPoint,
-    CsvImportPlan, CsvImportResult, ForecastSnapshot, MarketNewsFeed, MarketQuote,
-    MarketRefreshKind, MonthlyCashFlowPoint, NewPlanningGoal, NewPlanningItem, NewPlanningScenario,
-    NewRecurringRule, PlanningGoalKind, PlanningGoalRecord, PlanningItemRecord,
-    PlanningScenarioRecord, PolyMarket, PolySearchResult, PolyWatchEntry, ReconciliationRecord,
-    RecurringCadence, RecurringOccurrenceRecord, RecurringRuleRecord, SummaryRecord,
-    TransactionFilters, TransactionKind, TransactionRecord, UpdatePlanningGoal, UpdatePlanningItem,
-    UpdatePlanningScenario, UpdateRecurringRule, UpdateTransaction, WatchlistEntry, Weekday,
-    WeeklyBalancePoint,
+    CsvImportPlan, CsvImportResult, ForecastSnapshot, MonthlyCashFlowPoint, NewPlanningGoal,
+    NewPlanningItem, NewPlanningScenario, NewRecurringRule, PlanningGoalKind, PlanningGoalRecord,
+    PlanningItemRecord, PlanningScenarioRecord, ReconciliationRecord, RecurringCadence,
+    RecurringOccurrenceRecord, RecurringRuleRecord, SummaryRecord, TransactionFilters,
+    TransactionKind, TransactionRecord, UpdatePlanningGoal, UpdatePlanningItem,
+    UpdatePlanningScenario, UpdateRecurringRule, UpdateTransaction, Weekday, WeeklyBalancePoint,
 };
-use crate::poly::PolyService;
 use crate::today_iso;
 
 use super::{clamp_index, clean_output, command_template, empty_summary, shift_index};
@@ -39,10 +35,6 @@ pub(super) enum View {
     Summary,
     Budgets,
     Planning,
-    #[allow(dead_code)]
-    Markets,
-    #[allow(dead_code)]
-    Poly,
     Recurring,
     Reconcile,
 }
@@ -71,8 +63,6 @@ impl View {
             View::Summary => "SUMMARY",
             View::Budgets => "BUDGETS",
             View::Planning => "PLANNING",
-            View::Markets => "MARKETS",
-            View::Poly => "POLY",
             View::Recurring => "RECURRING",
             View::Reconcile => "RECONCILE",
         }
@@ -127,9 +117,6 @@ pub(super) enum FormKind {
     RecurringAdd,
     RecurringEdit { id: i64 },
     ReconcileStart,
-    WatchlistAdd,
-    PolyWatchAdd,
-    PolySearch,
 }
 
 #[derive(Clone)]
@@ -205,19 +192,10 @@ pub(super) struct CsvImportReviewState {
     pub(super) active: usize,
 }
 
-#[derive(Clone)]
-pub(super) struct PolySearchState {
-    pub(super) query: String,
-    pub(super) limit: usize,
-    pub(super) results: Vec<PolySearchResult>,
-    pub(super) active: usize,
-}
-
 enum FormOutcome {
     Refresh(String),
     OpenReconcile(ReconcileSelectionState, String),
     OpenImportReview(CsvImportReviewState, String),
-    OpenPolySearch(PolySearchState, String),
 }
 
 pub(super) struct App {
@@ -234,8 +212,6 @@ pub(super) struct App {
     pub(super) planning_item_index: usize,
     pub(super) planning_goal_index: usize,
     pub(super) planning_scenario_index: usize,
-    pub(super) market_index: usize,
-    pub(super) poly_index: usize,
     pub(super) recurring_index: usize,
     pub(super) reconciliation_index: usize,
     pub(super) balances: Vec<BalanceRecord>,
@@ -255,12 +231,6 @@ pub(super) struct App {
     pub(super) planning_goals: Vec<PlanningGoalRecord>,
     pub(super) planning_scenarios: Vec<PlanningScenarioRecord>,
     pub(super) selected_planning_scenario_id: Option<i64>,
-    pub(super) watchlist: Vec<WatchlistEntry>,
-    pub(super) market_quote: Option<MarketQuote>,
-    pub(super) market_news: Option<MarketNewsFeed>,
-    pub(super) poly_watchlist: Vec<PolyWatchEntry>,
-    pub(super) poly_market: Option<PolyMarket>,
-    pub(super) poly_movers: Vec<PolyMarket>,
     pub(super) recurring_rules: Vec<RecurringRuleRecord>,
     pub(super) due_occurrences: Vec<RecurringOccurrenceRecord>,
     pub(super) reconciliations: Vec<ReconciliationRecord>,
@@ -273,7 +243,6 @@ pub(super) struct App {
     pub(super) form_error: Option<String>,
     pub(super) reconcile_flow: Option<ReconcileSelectionState>,
     pub(super) import_review: Option<CsvImportReviewState>,
-    pub(super) poly_search: Option<PolySearchState>,
     pub(super) command_log: Vec<String>,
     pub(super) status: String,
 }
@@ -295,8 +264,6 @@ impl App {
             planning_item_index: 0,
             planning_goal_index: 0,
             planning_scenario_index: 0,
-            market_index: 0,
-            poly_index: 0,
             recurring_index: 0,
             reconciliation_index: 0,
             balances: Vec::new(),
@@ -316,12 +283,6 @@ impl App {
             planning_goals: Vec::new(),
             planning_scenarios: Vec::new(),
             selected_planning_scenario_id: None,
-            watchlist: Vec::new(),
-            market_quote: None,
-            market_news: None,
-            poly_watchlist: Vec::new(),
-            poly_market: None,
-            poly_movers: Vec::new(),
             recurring_rules: Vec::new(),
             due_occurrences: Vec::new(),
             reconciliations: Vec::new(),
@@ -334,7 +295,6 @@ impl App {
             form_error: None,
             reconcile_flow: None,
             import_review: None,
-            poly_search: None,
             command_log: vec![
                 "N opens a direct form for the current panel.".to_string(),
                 "E edits the selected item when that panel supports it.".to_string(),
@@ -406,12 +366,6 @@ impl App {
             self.db
                 .list_planning_items(selected_scenario.as_deref(), None, None)?;
         self.planning_goals = self.db.list_planning_goals()?;
-        self.watchlist.clear();
-        self.market_quote = None;
-        self.market_news = None;
-        self.poly_watchlist.clear();
-        self.poly_market = None;
-        self.poly_movers.clear();
         self.recurring_rules = self.db.list_recurring_rules()?;
         self.due_occurrences = self.db.list_due_occurrences(&today)?;
         self.reconciliations = self.db.list_reconciliations(None)?;
@@ -432,8 +386,6 @@ impl App {
             self.planning_scenario_index,
             self.planning_scenarios.len() + 1,
         );
-        self.market_index = clamp_index(self.market_index, self.watchlist.len());
-        self.poly_index = clamp_index(self.poly_index, self.poly_watchlist.len());
         self.recurring_index = clamp_index(self.recurring_index, self.recurring_rules.len());
         self.reconciliation_index =
             clamp_index(self.reconciliation_index, self.reconciliations.len());
@@ -442,9 +394,6 @@ impl App {
         }
         if let Some(review) = self.import_review.as_mut() {
             review.active = clamp_index(review.active, review.preview.preview.len());
-        }
-        if let Some(search) = self.poly_search.as_mut() {
-            search.active = clamp_index(search.active, search.results.len());
         }
     }
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool, AppError> {
@@ -459,9 +408,6 @@ impl App {
         }
         if self.import_review.is_some() {
             return self.handle_import_review_key(key);
-        }
-        if self.poly_search.is_some() {
-            return self.handle_poly_search_key(key);
         }
         if self.form.is_some() {
             return self.handle_form_key(key);
@@ -500,11 +446,7 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                let result = if matches!(self.current_view(), View::Markets) {
-                    self.refresh_selected_market(true)
-                } else if matches!(self.current_view(), View::Poly) {
-                    self.refresh_selected_poly(true)
-                } else if matches!(self.current_view(), View::Planning) {
+                let result = if matches!(self.current_view(), View::Planning) {
                     self.activate_selected_planning_entry()
                 } else {
                     self.open_edit_form_for_current_view()
@@ -527,16 +469,6 @@ impl App {
                 }
                 'j' => self.move_selection(1),
                 'k' => self.move_selection(-1),
-                'a' => {
-                    let result = match self.current_view() {
-                        View::Markets => self.refresh_all_watchlist_markets(),
-                        View::Poly => self.refresh_all_poly_watchlist(),
-                        _ => Ok(()),
-                    };
-                    if let Err(error) = result {
-                        self.status = error.to_string();
-                    }
-                }
                 'g' => {
                     let result = self.db.run_due_recurring(&today_iso());
                     match result {
@@ -554,8 +486,6 @@ impl App {
                         View::Categories => self.delete_selected_category(),
                         View::Budgets => self.delete_selected_budget(),
                         View::Planning => self.delete_selected_planning_entry(),
-                        View::Markets => self.remove_selected_watchlist_item(),
-                        View::Poly => self.remove_selected_poly_watch_item(),
                         View::Recurring => self.delete_selected_recurring_rule(),
                         View::Reconcile => self.delete_selected_reconciliation(),
                         _ => Ok(()),
@@ -572,7 +502,6 @@ impl App {
                 'f' => {
                     let result = match self.current_view() {
                         View::Transactions => self.open_transaction_filter_form(),
-                        View::Poly => self.open_poly_search_form(),
                         _ => Ok(()),
                     };
                     if let Err(error) = result {
@@ -592,8 +521,6 @@ impl App {
                         View::Accounts | View::Reconcile => {
                             self.open_reconcile_form_for_current_view()
                         }
-                        View::Markets => self.refresh_selected_market(true),
-                        View::Poly => self.refresh_selected_poly(true),
                         _ => Ok(()),
                     };
                     if let Err(error) = result {
@@ -603,13 +530,6 @@ impl App {
                 'i' => {
                     if let Err(error) = self.open_import_form_for_current_view() {
                         self.status = error.to_string();
-                    }
-                }
-                'm' => {
-                    if matches!(self.current_view(), View::Poly) {
-                        if let Err(error) = self.refresh_poly_movers() {
-                            self.status = error.to_string();
-                        }
                     }
                 }
                 'n' => {
@@ -628,7 +548,6 @@ impl App {
                 '/' => {
                     let result = match self.current_view() {
                         View::Transactions => self.open_transaction_filter_form(),
-                        View::Poly => self.open_poly_search_form(),
                         _ => {
                             self.open_input_mode_with_text("tx list --limit 20".to_string());
                             self.status = String::from(
@@ -734,61 +653,6 @@ impl App {
                 'k' => {
                     if let Some(review) = self.import_review.as_mut() {
                         shift_index(&mut review.active, review.preview.preview.len(), -1);
-                    }
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-        Ok(false)
-    }
-    fn handle_poly_search_key(&mut self, key: KeyEvent) -> Result<bool, AppError> {
-        match key.code {
-            KeyCode::Esc => {
-                self.poly_search = None;
-                self.status = String::from("Polymarket search closed.");
-            }
-            KeyCode::Down => {
-                if let Some(search) = self.poly_search.as_mut() {
-                    shift_index(&mut search.active, search.results.len(), 1);
-                }
-            }
-            KeyCode::Up => {
-                if let Some(search) = self.poly_search.as_mut() {
-                    shift_index(&mut search.active, search.results.len(), -1);
-                }
-            }
-            KeyCode::Enter => {
-                if let Err(error) = self.add_selected_poly_search_result() {
-                    self.status = error.to_string();
-                }
-            }
-            KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if ch.to_ascii_lowercase() == 's' {
-                    if let Err(error) = self.rerun_poly_search() {
-                        self.status = error.to_string();
-                    }
-                }
-            }
-            KeyCode::Char(ch) => match ch.to_ascii_lowercase() {
-                'j' => {
-                    if let Some(search) = self.poly_search.as_mut() {
-                        shift_index(&mut search.active, search.results.len(), 1);
-                    }
-                }
-                'k' => {
-                    if let Some(search) = self.poly_search.as_mut() {
-                        shift_index(&mut search.active, search.results.len(), -1);
-                    }
-                }
-                'a' => {
-                    if let Err(error) = self.add_selected_poly_search_result() {
-                        self.status = error.to_string();
-                    }
-                }
-                'r' => {
-                    if let Err(error) = self.rerun_poly_search() {
-                        self.status = error.to_string();
                     }
                 }
                 _ => {}
@@ -924,18 +788,6 @@ impl App {
                     );
                 }
             },
-            View::Markets => {
-                shift_index(&mut self.market_index, self.watchlist.len(), delta);
-                if let Err(error) = self.load_selected_market_from_cache() {
-                    self.status = error.to_string();
-                }
-            }
-            View::Poly => {
-                shift_index(&mut self.poly_index, self.poly_watchlist.len(), delta);
-                if let Err(error) = self.load_selected_poly_from_cache() {
-                    self.status = error.to_string();
-                }
-            }
             View::Recurring => {
                 shift_index(&mut self.recurring_index, self.recurring_rules.len(), delta)
             }
@@ -1189,195 +1041,16 @@ impl App {
         self.status = format!("Removed reconciliation {}.", reconciliation_id);
         Ok(())
     }
-
-    fn load_selected_market_from_cache(&mut self) -> Result<(), AppError> {
-        self.market_quote = None;
-        self.market_news = None;
-        self.market_index = clamp_index(self.market_index, self.watchlist.len());
-        let Some(entry) = self.watchlist.get(self.market_index) else {
-            return Ok(());
-        };
-        self.market_quote = self.db.cached_quote(&entry.ticker)?;
-        self.market_news = self.db.cached_news(&entry.ticker)?;
-        Ok(())
-    }
-
-    fn selected_watchlist_ticker(&self) -> Result<String, AppError> {
-        self.watchlist
-            .get(self.market_index)
-            .map(|entry| entry.ticker.clone())
-            .ok_or_else(|| AppError::Validation("no watchlist ticker selected".to_string()))
-    }
-
-    fn refresh_selected_market(&mut self, fetch_live: bool) -> Result<(), AppError> {
-        let ticker = self.selected_watchlist_ticker()?;
-        if fetch_live {
-            let service = MarketService::from_env();
-            let summary = service.refresh_watchlist(
-                &self.db,
-                Some(&ticker),
-                false,
-                MarketRefreshKind::Both,
-            )?;
-            self.watchlist = service.list_watchlist(&self.db)?;
-            self.market_index = self
-                .watchlist
-                .iter()
-                .position(|entry| entry.ticker.eq_ignore_ascii_case(&ticker))
-                .unwrap_or(0);
-            self.load_selected_market_from_cache()?;
-            self.status = format!(
-                "Refreshed {} quote(s) and {} news feed(s) for {}.",
-                summary.quote_refreshed, summary.news_refreshed, ticker
-            );
-        } else {
-            self.load_selected_market_from_cache()?;
-        }
-        Ok(())
-    }
-
-    fn refresh_all_watchlist_markets(&mut self) -> Result<(), AppError> {
-        let service = MarketService::from_env();
-        let summary = service.refresh_watchlist(&self.db, None, true, MarketRefreshKind::Both)?;
-        self.refresh()?;
-        self.status = format!(
-            "Refreshed {} quote(s) and {} news feed(s) across {} ticker(s).",
-            summary.quote_refreshed, summary.news_refreshed, summary.tickers_considered
-        );
-        Ok(())
-    }
-
-    fn remove_selected_watchlist_item(&mut self) -> Result<(), AppError> {
-        let ticker = self.selected_watchlist_ticker()?;
-        MarketService::from_env().remove_watchlist(&self.db, &ticker)?;
-        self.refresh()?;
-        self.status = format!("Removed {} from the watchlist.", ticker);
-        Ok(())
-    }
-    fn load_selected_poly_from_cache(&mut self) -> Result<(), AppError> {
-        self.poly_market = None;
-        self.poly_index = clamp_index(self.poly_index, self.poly_watchlist.len());
-        let Some(entry) = self.poly_watchlist.get(self.poly_index) else {
-            return Ok(());
-        };
-        self.poly_market = self.db.cached_poly_market(&entry.slug)?;
-        Ok(())
-    }
-
-    fn selected_poly_slug(&self) -> Result<String, AppError> {
-        self.poly_watchlist
-            .get(self.poly_index)
-            .map(|entry| entry.slug.clone())
-            .ok_or_else(|| AppError::Validation("no Polymarket watch item selected".to_string()))
-    }
-
-    fn refresh_selected_poly(&mut self, fetch_live: bool) -> Result<(), AppError> {
-        let slug = self.selected_poly_slug()?;
-        if fetch_live {
-            let service = PolyService::from_env();
-            let summary = service.refresh_watchlist(&self.db, Some(&slug), false)?;
-            self.poly_watchlist = service.list_watchlist(&self.db)?;
-            self.poly_index = self
-                .poly_watchlist
-                .iter()
-                .position(|entry| entry.slug.eq_ignore_ascii_case(&slug))
-                .unwrap_or(0);
-            self.load_selected_poly_from_cache()?;
-            self.status = format!(
-                "Refreshed {} Polymarket market(s) for {}.",
-                summary.markets_refreshed, slug
-            );
-        } else {
-            self.load_selected_poly_from_cache()?;
-        }
-        Ok(())
-    }
-
-    fn refresh_poly_movers(&mut self) -> Result<(), AppError> {
-        self.poly_movers = PolyService::from_env().movers(&self.db, 8, false)?;
-        self.status = format!("Refreshed {} Polymarket mover(s).", self.poly_movers.len());
-        Ok(())
-    }
-
-    fn refresh_all_poly_watchlist(&mut self) -> Result<(), AppError> {
-        let service = PolyService::from_env();
-        let summary = service.refresh_watchlist(&self.db, None, true)?;
-        self.refresh()?;
-        self.status = format!(
-            "Refreshed {} Polymarket market(s) across {} watched slug(s).",
-            summary.markets_refreshed, summary.slugs_considered
-        );
-        Ok(())
-    }
-
-    fn remove_selected_poly_watch_item(&mut self) -> Result<(), AppError> {
-        let slug = self.selected_poly_slug()?;
-        PolyService::from_env().remove_watchlist(&self.db, &slug)?;
-        self.refresh()?;
-        self.status = format!("Removed {} from the Polymarket watchlist.", slug);
-        Ok(())
-    }
-    fn rerun_poly_search(&mut self) -> Result<(), AppError> {
-        let (query, limit) = self
-            .poly_search
-            .as_ref()
-            .map(|search| (search.query.clone(), search.limit))
-            .ok_or_else(|| AppError::Validation("Polymarket search is not active".to_string()))?;
-        let results = PolyService::from_env().search(&query, limit)?;
-        let result_count = results.len();
-        self.poly_search = Some(PolySearchState {
-            query,
-            limit,
-            results,
-            active: 0,
-        });
-        self.status = format!(
-            "Loaded {} Polymarket result(s). Press Enter or A to add the selected market.",
-            result_count
-        );
-        Ok(())
-    }
-
-    fn add_selected_poly_search_result(&mut self) -> Result<(), AppError> {
-        let Some(search) = self.poly_search.as_ref() else {
-            return Err(AppError::Validation(
-                "Polymarket search is not active".to_string(),
-            ));
-        };
-        let selected = search.results.get(search.active).ok_or_else(|| {
-            AppError::Validation("No Polymarket search result is selected".to_string())
-        })?;
-        let slug = selected.slug.clone();
-        let label = Some(selected.question.clone());
-        let service = PolyService::from_env();
-        let _ = service.add_watchlist(&self.db, &slug, label.as_deref())?;
-        self.refresh()?;
-        self.poly_index = self
-            .poly_watchlist
-            .iter()
-            .position(|entry| entry.slug.eq_ignore_ascii_case(&slug))
-            .unwrap_or(self.poly_index);
-        self.load_selected_poly_from_cache()?;
-        self.poly_search = None;
-        self.status = format!(
-            "Added {} to the Polymarket watchlist. Press R to refresh live data.",
-            slug
-        );
-        Ok(())
-    }
     fn open_form_for_current_view(&mut self) -> Result<(), AppError> {
         self.show_help = false;
         self.input_mode = false;
         self.reconcile_flow = None;
-        self.poly_search = None;
         let form = match self.current_view() {
             View::Dashboard | View::Transactions => Some(self.transaction_add_form()),
             View::Accounts => Some(self.account_form()),
             View::Categories => Some(self.category_form()),
             View::Summary | View::Budgets => Some(self.budget_form_for_selected()),
             View::Planning => Some(self.planning_form_for_current_subview()?),
-            View::Markets => Some(self.watchlist_add_form()),
-            View::Poly => Some(self.poly_watch_add_form()),
             View::Recurring => Some(self.recurring_add_form()),
             View::Reconcile => Some(self.reconcile_start_form(self.selected_account_name())),
         };
@@ -1392,7 +1065,6 @@ impl App {
         self.show_help = false;
         self.input_mode = false;
         self.reconcile_flow = None;
-        self.poly_search = None;
         let form = match self.current_view() {
             View::Transactions => Some(self.transaction_edit_form()?),
             View::Accounts => Some(self.account_edit_form()?),
@@ -1403,7 +1075,7 @@ impl App {
             View::Reconcile => {
                 return self.open_reconcile_form_for_current_view();
             }
-            View::Dashboard | View::Summary | View::Markets | View::Poly => {
+            View::Dashboard | View::Summary => {
                 return Err(AppError::Validation(
                     "this panel does not support inline edit yet".to_string(),
                 ));
@@ -1420,7 +1092,6 @@ impl App {
         self.show_help = false;
         self.input_mode = false;
         self.reconcile_flow = None;
-        self.poly_search = None;
         self.open_form(
             Some(self.reconcile_start_form(self.selected_account_name())),
             "Reconciliation setup active. Enter account/date/balance, then press Enter, Ctrl+S, or F2.",
@@ -1432,7 +1103,6 @@ impl App {
         self.show_help = false;
         self.input_mode = false;
         self.reconcile_flow = None;
-        self.poly_search = None;
         self.import_review = None;
         let form = Some(match self.current_view() {
             View::Transactions | View::Accounts => self.import_form(),
@@ -1459,27 +1129,9 @@ impl App {
         self.input_mode = false;
         self.reconcile_flow = None;
         self.import_review = None;
-        self.poly_search = None;
         self.open_form(
             Some(self.transaction_filter_form()),
             "Transaction filter form active. Leave fields blank to disable them, then press Enter, Ctrl+S, or F2.",
-        );
-        Ok(())
-    }
-    fn open_poly_search_form(&mut self) -> Result<(), AppError> {
-        if !matches!(self.current_view(), View::Poly) {
-            return Err(AppError::Validation(
-                "Polymarket search is only available from POLY".to_string(),
-            ));
-        }
-        self.show_help = false;
-        self.input_mode = false;
-        self.reconcile_flow = None;
-        self.import_review = None;
-        self.poly_search = None;
-        self.open_form(
-            Some(self.poly_search_form()),
-            "Polymarket search active. Fill query/limit and press Ctrl+S to fetch markets.",
         );
         Ok(())
     }
@@ -1502,68 +1154,6 @@ impl App {
         self.refresh()?;
         self.status = String::from("Transaction filters cleared. Showing recent activity again.");
         Ok(())
-    }
-    fn poly_search_form(&self) -> FormState {
-        let (query, limit) = self
-            .poly_search
-            .as_ref()
-            .map(|search| (search.query.clone(), search.limit.to_string()))
-            .unwrap_or_else(|| {
-                let default_query = self
-                    .poly_market
-                    .as_ref()
-                    .map(|market| market.question.clone())
-                    .or_else(|| {
-                        self.poly_watchlist
-                            .get(self.poly_index)
-                            .map(|entry| entry.slug.clone())
-                    })
-                    .unwrap_or_default();
-                (default_query, "8".to_string())
-            });
-        FormState {
-            kind: FormKind::PolySearch,
-            title: "SEARCH POLYMARKET",
-            hint: "Enter a query and result limit, then press Ctrl+S. In results: Enter/A adds selected market.",
-            fields: vec![
-                FormField {
-                    label: "QUERY",
-                    value: query,
-                    required: true,
-                },
-                FormField {
-                    label: "LIMIT",
-                    value: limit,
-                    required: true,
-                },
-            ],
-            active: 0,
-        }
-    }
-    fn watchlist_add_form(&self) -> FormState {
-        FormState {
-            kind: FormKind::WatchlistAdd,
-            title: "ADD WATCHLIST TICKER",
-            hint: "Add a ticker symbol and optional label. Use R or Enter from MARKETS to refresh live data.",
-            fields: vec![
-                FormField { label: "TICKER", value: String::new(), required: true },
-                FormField { label: "LABEL", value: String::new(), required: false },
-            ],
-            active: 0,
-        }
-    }
-
-    fn poly_watch_add_form(&self) -> FormState {
-        FormState {
-            kind: FormKind::PolyWatchAdd,
-            title: "ADD POLYMARKET MARKET",
-            hint: "Add a Polymarket market slug or full event URL. Use R or Enter from POLY to refresh live data.",
-            fields: vec![
-                FormField { label: "SLUG", value: String::new(), required: true },
-                FormField { label: "LABEL", value: String::new(), required: false },
-            ],
-            active: 0,
-        }
     }
     fn import_form(&self) -> FormState {
         FormState {
@@ -2410,11 +2000,6 @@ impl App {
                 self.import_review = Some(review);
                 self.status = message;
             }
-            FormOutcome::OpenPolySearch(search, message) => {
-                self.clear_form_state();
-                self.poly_search = Some(search);
-                self.status = message;
-            }
         }
         Ok(())
     }
@@ -2439,9 +2024,6 @@ impl App {
             FormKind::RecurringAdd => self.save_new_recurring_rule(form),
             FormKind::RecurringEdit { id } => self.save_recurring_edit(id, form),
             FormKind::ReconcileStart => self.start_reconciliation_review(form),
-            FormKind::WatchlistAdd => self.save_watchlist_add(form),
-            FormKind::PolyWatchAdd => self.save_poly_watch_add(form),
-            FormKind::PolySearch => self.save_poly_search(form),
         }
     }
 
@@ -2722,46 +2304,6 @@ impl App {
         Ok(())
     }
 
-    fn save_watchlist_add(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
-        let ticker = form_value(form, 0).trim().to_string();
-        let label = optional_field(form, 1);
-        let watchlist_id =
-            MarketService::from_env().add_watchlist(&self.db, &ticker, label.as_deref())?;
-        Ok(FormOutcome::Refresh(format!(
-            "Added {} to the watchlist as item {}.",
-            ticker.to_ascii_uppercase(),
-            watchlist_id
-        )))
-    }
-    fn save_poly_watch_add(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
-        let slug = form_value(form, 0).trim().to_string();
-        let label = optional_field(form, 1);
-        let watch_id = PolyService::from_env().add_watchlist(&self.db, &slug, label.as_deref())?;
-        Ok(FormOutcome::Refresh(format!(
-            "Added {} to the Polymarket watchlist as item {}.",
-            slug.to_ascii_lowercase(),
-            watch_id
-        )))
-    }
-    fn save_poly_search(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
-        let query = form_value(form, 0).trim().to_string();
-        let limit = parse_optional_limit(Some(form_value(form, 1).trim().to_string()), "LIMIT")?
-            .unwrap_or(8);
-        let results = PolyService::from_env().search(&query, limit)?;
-        let count = results.len();
-        Ok(FormOutcome::OpenPolySearch(
-            PolySearchState {
-                query,
-                limit,
-                results,
-                active: 0,
-            },
-            format!(
-                "Loaded {} Polymarket result(s). Press Enter or A to add the selected market.",
-                count
-            ),
-        ))
-    }
     fn save_new_recurring_rule(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
         let rule = build_new_recurring_rule(form)?;
         let rule_id = self.db.add_recurring_rule(&rule)?;
@@ -2852,7 +2394,6 @@ impl App {
         self.clear_form_state();
         self.input_buffer.clear();
         self.reconcile_flow = None;
-        self.poly_search = None;
         self.show_help = false;
         self.status = String::from(
             "Command mode active. Type `help`, `balance`, or any full CLI command and press Enter.",
@@ -3031,12 +2572,6 @@ impl App {
             View::Budgets => String::from("N new budget | E edit budget | D delete/reset | S commands"),
             View::Planning => String::from(
                 "Left/Right subview | N add | E edit | D archive | Enter select/post | R refresh",
-            ),
-            View::Markets => String::from(
-                "N add ticker | Enter/R refresh | A refresh all | D remove | S commands",
-            ),
-            View::Poly => String::from(
-                "N add slug | F or / search | Enter/R refresh | A refresh all | M movers | D remove | S commands",
             ),
             View::Recurring => {
                 String::from("N new | E edit | P pause/resume | D delete | G post due | S commands")
@@ -3509,10 +3044,22 @@ mod tests {
     }
 
     #[test]
-    fn t_ui_navigation_excludes_market_and_poly_tabs() {
+    fn t_ui_navigation_matches_supported_panels() {
         let labels: Vec<&str> = View::all().iter().map(|view| view.label()).collect();
-        assert!(!labels.contains(&"MARKETS"));
-        assert!(!labels.contains(&"POLY"));
+        assert_eq!(
+            labels,
+            vec![
+                "DASHBOARD",
+                "TRANSACTIONS",
+                "ACCOUNTS",
+                "CATEGORIES",
+                "SUMMARY",
+                "BUDGETS",
+                "PLANNING",
+                "RECURRING",
+                "RECONCILE",
+            ]
+        );
     }
 
     #[test]
