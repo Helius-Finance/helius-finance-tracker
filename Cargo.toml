@@ -5,8 +5,8 @@ edition = "2021"
 description = "Local-first personal finance tracker for Windows with a Rust CLI/TUI, SQLite storage, budgets, recurring bills, and cash-flow forecasting"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/STVR393/helius"
-homepage = "https://github.com/STVR393/helius"
+repository = "https://github.com/STVR393/helius-personal-finance-tracker"
+homepage = "https://github.com/STVR393/helius-personal-finance-tracker"
 keywords = ["personal-finance", "budget-tracker", "ledger", "tui", "sqlite"]
 categories = ["command-line-utilities", "database"]
 
