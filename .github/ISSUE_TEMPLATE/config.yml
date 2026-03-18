@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security reporting guidance
+    url: https://github.com/STVR393/helius-personal-finance-tracker/blob/main/SECURITY.md
+    about: Please read the security policy before reporting vulnerabilities.
