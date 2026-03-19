@@ -222,8 +222,8 @@ Overrides:
 
 ## License
 
-Copyright 2026 Kosta. This project is released under the Apache License 2.0.
-See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Copyright 2026 Kosta. This project is released under the GNU Affero General Public License v3.0.
+See [LICENSE](LICENSE).
 
 ## Release Notes
 
