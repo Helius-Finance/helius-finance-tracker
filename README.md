@@ -2,7 +2,7 @@
 
 Helius is a local-first personal finance tracker built in Rust with a full-screen terminal UI and direct CLI commands. It runs as a single executable, stores data in SQLite, and focuses on practical money tracking, budgeting, recurring bills, reconciliation, and cash-flow forecasting without any cloud dependency.
 
-<img width="1897" height="931" alt="image" src="https://github.com/user-attachments/assets/2252b757-5244-41d5-97ce-af2d2785d08c" />
+![heliusdemo](https://github.com/user-attachments/assets/fa79b536-9784-4c22-8a9b-402cfaa5efda)
 
 ## Why Helius
 
