@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::NaiveDate;
@@ -703,15 +703,12 @@ impl App {
                 }
             }
             KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                match ch.to_ascii_lowercase() {
-                    'u' => {
-                        if let Some(form) = self.form.as_mut() {
-                            form.current_field_mut().value.clear();
-                            self.form_replace_on_input = false;
-                            self.form_error = None;
-                        }
+                if ch.eq_ignore_ascii_case(&'u') {
+                    if let Some(form) = self.form.as_mut() {
+                        form.current_field_mut().value.clear();
+                        self.form_replace_on_input = false;
+                        self.form_error = None;
                     }
-                    _ => {}
                 }
             }
             KeyCode::Char(ch) => {
@@ -741,7 +738,7 @@ impl App {
             }
             KeyCode::Tab => self.input_buffer.push(' '),
             KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if ch.to_ascii_lowercase() == 'u' {
+                if ch.eq_ignore_ascii_case(&'u') {
                     self.input_buffer.clear();
                     self.status = String::from("Input cleared.");
                 }
@@ -823,7 +820,7 @@ impl App {
             .ok_or_else(|| AppError::Validation("no category selected".to_string()))?;
         self.db.delete_category(&category_id.to_string())?;
         self.refresh()?;
-        self.status = format!("Archived category {}.", category_id);
+        self.status = format!("Archived category {category_id}.");
         Ok(())
     }
 
@@ -916,10 +913,8 @@ impl App {
                 } else {
                     let transaction_id = self.db.post_planning_item(item_id)?;
                     self.refresh()?;
-                    self.status = format!(
-                        "Posted planning item {} as transaction {}.",
-                        item_id, transaction_id
-                    );
+                    self.status =
+                        format!("Posted planning item {item_id} as transaction {transaction_id}.");
                     Ok(())
                 }
             }
@@ -956,7 +951,7 @@ impl App {
                     .ok_or_else(|| AppError::Validation("no planning item selected".to_string()))?;
                 self.db.delete_planning_item(item_id)?;
                 self.refresh()?;
-                self.status = format!("Archived planning item {}.", item_id);
+                self.status = format!("Archived planning item {item_id}.");
                 Ok(())
             }
             PlanningSubview::Goals => {
@@ -967,7 +962,7 @@ impl App {
                     .ok_or_else(|| AppError::Validation("no goal selected".to_string()))?;
                 self.db.delete_planning_goal(goal_id)?;
                 self.refresh()?;
-                self.status = format!("Archived goal {}.", goal_id);
+                self.status = format!("Archived goal {goal_id}.");
                 Ok(())
             }
             PlanningSubview::Scenarios => {
@@ -984,7 +979,7 @@ impl App {
                     self.selected_planning_scenario_id = None;
                 }
                 self.refresh()?;
-                self.status = format!("Archived scenario {}.", scenario_name);
+                self.status = format!("Archived scenario {scenario_name}.");
                 Ok(())
             }
         }
@@ -1009,7 +1004,7 @@ impl App {
             .ok_or_else(|| AppError::Validation("no recurring rule selected".to_string()))?;
         self.db.delete_recurring_rule(rule_id)?;
         self.refresh()?;
-        self.status = format!("Deleted recurring rule {}.", rule_id);
+        self.status = format!("Deleted recurring rule {rule_id}.");
         Ok(())
     }
 
@@ -1038,7 +1033,7 @@ impl App {
             .ok_or_else(|| AppError::Validation("no reconciliation selected".to_string()))?;
         self.db.delete_reconciliation(reconciliation_id)?;
         self.refresh()?;
-        self.status = format!("Removed reconciliation {}.", reconciliation_id);
+        self.status = format!("Removed reconciliation {reconciliation_id}.");
         Ok(())
     }
     fn open_form_for_current_view(&mut self) -> Result<(), AppError> {
@@ -1965,7 +1960,7 @@ impl App {
         )?;
         self.reconcile_flow = None;
         self.refresh()?;
-        self.status = format!("Created reconciliation {}.", reconciliation_id);
+        self.status = format!("Created reconciliation {reconciliation_id}.");
         Ok(())
     }
 
@@ -2041,8 +2036,7 @@ impl App {
         };
         let transaction_id = self.db.add_transaction(&transaction)?;
         Ok(FormOutcome::Refresh(format!(
-            "Created transaction {}.",
-            transaction_id
+            "Created transaction {transaction_id}."
         )))
     }
 
@@ -2068,7 +2062,7 @@ impl App {
             clear_note: optional_field(form, 7).is_none(),
         };
         self.db.edit_transaction(&patch)?;
-        Ok(FormOutcome::Refresh(format!("Updated transaction {}.", id)))
+        Ok(FormOutcome::Refresh(format!("Updated transaction {id}.")))
     }
 
     fn save_new_account(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
@@ -2080,8 +2074,7 @@ impl App {
             &normalize_date_input(form_value(form, 3))?,
         )?;
         Ok(FormOutcome::Refresh(format!(
-            "Created account {}.",
-            account_id
+            "Created account {account_id}."
         )))
     }
 
@@ -2094,15 +2087,14 @@ impl App {
             Some(parse_balance_to_cents(form_value(form, 2))?),
             Some(&normalize_date_input(form_value(form, 3))?),
         )?;
-        Ok(FormOutcome::Refresh(format!("Updated account {}.", id)))
+        Ok(FormOutcome::Refresh(format!("Updated account {id}.")))
     }
 
     fn save_new_category(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
         let kind = parse_category_kind(form_value(form, 1))?;
         let category_id = self.db.add_category(form_value(form, 0).trim(), &kind)?;
         Ok(FormOutcome::Refresh(format!(
-            "Created category {}.",
-            category_id
+            "Created category {category_id}."
         )))
     }
 
@@ -2113,7 +2105,7 @@ impl App {
             Some(form_value(form, 0).trim()),
             Some(&kind),
         )?;
-        Ok(FormOutcome::Refresh(format!("Updated category {}.", id)))
+        Ok(FormOutcome::Refresh(format!("Updated category {id}.")))
     }
 
     fn save_budget(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
@@ -2124,7 +2116,7 @@ impl App {
             optional_field(form, 3).as_deref(),
             optional_field(form, 4).as_deref(),
         )?;
-        Ok(FormOutcome::Refresh(format!("Saved budget {}.", budget_id)))
+        Ok(FormOutcome::Refresh(format!("Saved budget {budget_id}.")))
     }
 
     fn save_new_planning_item(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
@@ -2142,8 +2134,7 @@ impl App {
         };
         let item_id = self.db.add_planning_item(&item)?;
         Ok(FormOutcome::Refresh(format!(
-            "Created planning item {}.",
-            item_id
+            "Created planning item {item_id}."
         )))
     }
 
@@ -2171,10 +2162,7 @@ impl App {
             clear_note: optional_field(form, 9).is_none(),
         };
         self.db.edit_planning_item(&patch)?;
-        Ok(FormOutcome::Refresh(format!(
-            "Updated planning item {}.",
-            id
-        )))
+        Ok(FormOutcome::Refresh(format!("Updated planning item {id}.")))
     }
 
     fn save_new_planning_goal(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
@@ -2193,7 +2181,7 @@ impl App {
                 .transpose()?,
         };
         let goal_id = self.db.add_planning_goal(&goal)?;
-        Ok(FormOutcome::Refresh(format!("Created goal {}.", goal_id)))
+        Ok(FormOutcome::Refresh(format!("Created goal {goal_id}.")))
     }
 
     fn save_planning_goal_edit(
@@ -2220,7 +2208,7 @@ impl App {
             clear_due_on: optional_field(form, 5).is_none(),
         };
         self.db.edit_planning_goal(&patch)?;
-        Ok(FormOutcome::Refresh(format!("Updated goal {}.", id)))
+        Ok(FormOutcome::Refresh(format!("Updated goal {id}.")))
     }
 
     fn save_new_planning_scenario(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
@@ -2230,8 +2218,7 @@ impl App {
             note: optional_field(form, 1),
         })?;
         Ok(FormOutcome::Refresh(format!(
-            "Created scenario {} (id {}).",
-            scenario_name, scenario_id
+            "Created scenario {scenario_name} (id {scenario_id})."
         )))
     }
 
@@ -2248,8 +2235,7 @@ impl App {
             clear_note: optional_field(form, 1).is_none(),
         })?;
         Ok(FormOutcome::Refresh(format!(
-            "Updated scenario {} (id {}).",
-            scenario_name, id
+            "Updated scenario {scenario_name} (id {id})."
         )))
     }
 
@@ -2308,8 +2294,7 @@ impl App {
         let rule = build_new_recurring_rule(form)?;
         let rule_id = self.db.add_recurring_rule(&rule)?;
         Ok(FormOutcome::Refresh(format!(
-            "Created recurring rule {}.",
-            rule_id
+            "Created recurring rule {rule_id}."
         )))
     }
 
@@ -2350,8 +2335,7 @@ impl App {
         };
         self.db.edit_recurring_rule(&patch)?;
         Ok(FormOutcome::Refresh(format!(
-            "Updated recurring rule {}.",
-            id
+            "Updated recurring rule {id}."
         )))
     }
 
@@ -2591,12 +2575,11 @@ fn parse_optional_limit(raw: Option<String>, label: &str) -> Result<Option<usize
     match raw {
         Some(value) => {
             let parsed = value.trim().parse::<usize>().map_err(|_| {
-                AppError::Validation(format!("{} must be a whole positive number", label))
+                AppError::Validation(format!("{label} must be a whole positive number"))
             })?;
             if parsed == 0 {
                 return Err(AppError::Validation(format!(
-                    "{} must be a whole positive number",
-                    label
+                    "{label} must be a whole positive number"
                 )));
             }
             Ok(Some(parsed))
@@ -2693,11 +2676,10 @@ fn parse_positive_i64(raw: &str, label: &str) -> Result<i64, AppError> {
     let parsed = raw
         .trim()
         .parse::<i64>()
-        .map_err(|_| AppError::Validation(format!("{} must be a whole positive number", label)))?;
+        .map_err(|_| AppError::Validation(format!("{label} must be a whole positive number")))?;
     if parsed <= 0 {
         return Err(AppError::Validation(format!(
-            "{} must be a whole positive number",
-            label
+            "{label} must be a whole positive number"
         )));
     }
     Ok(parsed)
@@ -2723,7 +2705,7 @@ fn parse_yes_no(raw: &str, label: &str) -> Result<bool, AppError> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "yes" | "y" | "true" | "1" => Ok(true),
         "no" | "n" | "false" | "0" => Ok(false),
-        _ => Err(AppError::Validation(format!("{} must be yes or no", label))),
+        _ => Err(AppError::Validation(format!("{label} must be yes or no"))),
     }
 }
 fn parse_transaction_kind(raw: &str) -> Result<TransactionKind, AppError> {
@@ -2834,9 +2816,9 @@ fn normalize_input_command_tokens(mut tokens: Vec<String>) -> Vec<String> {
 }
 
 fn is_helius_program_token(token: &str) -> bool {
-    let file_name = Path::new(token)
-        .file_name()
-        .and_then(|value| value.to_str())
+    let file_name = token
+        .rsplit(['/', '\\'])
+        .next()
         .unwrap_or(token)
         .to_ascii_lowercase();
     file_name == "helius" || file_name == "helius.exe"
@@ -3079,6 +3061,14 @@ mod tests {
                 "list".to_string()
             ]),
             vec!["recurring".to_string(), "list".to_string()]
+        );
+        assert_eq!(
+            normalize_input_command_tokens(vec![
+                "/usr/local/bin/helius".to_string(),
+                "forecast".to_string(),
+                "show".to_string()
+            ]),
+            vec!["forecast".to_string(), "show".to_string()]
         );
     }
 }

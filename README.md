@@ -1,60 +1,53 @@
-# Helius: Local-First Personal Finance Tracker
+<p align="center">
+  <img src="assets/branding/helius-logo.svg" alt="Helius logo" width="760" />
+</p>
 
-Helius is a local-first personal finance tracker built in Rust with a full-screen terminal UI and direct CLI commands. It runs as a single executable, stores data in SQLite, and focuses on practical money tracking, budgeting, recurring bills, reconciliation, and cash-flow forecasting without any cloud dependency.
+# Helius
+
+[Latest Release](https://github.com/STVR393/helius-personal-finance-tracker/releases) | [Quick Start](QUICKSTART.md) | [Wiki](wiki/Home.md)
+
+Helius is a local-first personal finance tracker with a Rust CLI/TUI and SQLite storage. It runs as a single binary and keeps data in one local database file.
+
+Supported targets: Windows x86_64 and Linux x86_64.
 
 ![heliusdemo](https://github.com/user-attachments/assets/fa79b536-9784-4c22-8a9b-402cfaa5efda)
 
-## Why Helius
+## Features
 
-- Local-first: your data stays in one SQLite file on your machine
-- Fast startup: native Rust binary with no daemon and no background service
-- Practical workflow: accounts, transactions, budgets, recurring bills, reconciliation, and planning in one place
-- Scriptable: direct CLI commands plus JSON output for automation and export
-
-## What It Does
-
-- Full-screen terminal UI with a compact Bloomberg style (I love their terminal :p) theme
+- Full-screen terminal UI
+- Direct CLI commands
+- SQLite storage in a single local database
 - Accounts, categories, income, expense, and transfer transactions
 - Recurring rules, reconciliation, budgets, and cash-flow planning
 - JSON output for scripting and CSV export for reporting
-- Local SQLite storage with schema migrations and automatic DB creation via `init`
-
-## Design Goals
-
-- Fast startup
-- Low memory use
-- Single-user, local-only workflow
-- No daemon, no background service, no async runtime
 
 ## Installation
 
 ### Option 1: Download a release binary
 
-For most Windows users, the simplest path is:
-
 1. Open the [GitHub Releases](https://github.com/STVR393/helius-personal-finance-tracker/releases) page.
-2. Download the latest Windows package, for example `helius-v0.1.3-windows-x86_64.zip`.
-3. Extract `helius.exe` into a folder you keep for apps, for example `C:\Tools\Helius\`.
-4. Launch it by double-clicking `helius.exe`, or from a terminal with:
+2. Download the archive for your platform:
+   - Windows x86_64: `helius-<version>-windows-x86_64.zip`
+   - Linux x86_64: `helius-<version>-linux-x86_64.tar.gz`
+3. Extract the archive into a folder you keep for apps or tools.
+4. Launch the binary for your platform:
 
 ```powershell
 .\helius.exe
 ```
 
-On first launch, if no database exists yet, Helius prompts for a 3-letter currency
-code and initializes `%LOCALAPPDATA%\Helius\tracker.db` before opening the TUI.
+```bash
+./helius
+```
 
-If you want to run it from anywhere, add that folder to your `PATH`.
-
-Release packages are built for local, single-user use and do not require any
-extra runtime or database server.
+On first run, if no database exists, Helius prompts for a 3-letter currency code and initializes the default database for the current platform.
 
 ### Option 2: Build from source
 
 Requirements:
 
 - Rust stable toolchain
-- Windows is the primary supported target today
+- Windows or Linux
 
 Clone the repository, then build:
 
@@ -62,44 +55,46 @@ Clone the repository, then build:
 cargo build --release
 ```
 
-The compiled binary is written to:
+The compiled binary is written to one of:
 
 ```text
 target\release\helius.exe
+target/release/helius
 ```
 
-### Option 3: Install from a local checkout
-
-If you want a `helius` command in your Cargo bin directory:
+### Option 3: Install from a checkout
 
 ```powershell
 cargo install --path .
 ```
 
-## Verify The Download
+### Option 4: Run in Docker
 
-After you download a release build, check that it starts and prints help:
+The container stores its database at `/data/tracker.db`.
 
-```powershell
-.\helius.exe --help
+Build the image locally:
+
+```bash
+docker build -t helius .
 ```
 
-If you prefer to keep your data in a custom location, launch with:
+Create a named volume and start Helius:
 
-```powershell
-.\helius.exe --db C:\path\to\tracker.db
+```bash
+docker volume create helius-data
+docker run --rm -it -v helius-data:/data helius
 ```
 
-## Development
+Run direct commands the same way:
 
-Build and test:
-
-```powershell
-cargo test
-cargo build --release
+```bash
+docker run --rm -v helius-data:/data helius balance
+docker run --rm -v helius-data:/data helius tx list --limit 20
 ```
 
-## Run
+Use `-it` for the TUI or interactive shell.
+
+## Usage
 
 Start the terminal UI:
 
@@ -107,13 +102,13 @@ Start the terminal UI:
 helius
 ```
 
-Use the guided shell:
+Open the guided shell:
 
 ```powershell
 helius shell
 ```
 
-Run a direct command:
+Run direct commands:
 
 ```powershell
 helius init --currency USD
@@ -121,18 +116,19 @@ helius balance
 helius tx list --limit 20
 ```
 
-If you are running the binary directly without adding it to `PATH`, use:
+If you are launching a binary directly instead of using `PATH`:
 
 ```powershell
 .\helius.exe init --currency USD
 .\helius.exe balance
 ```
 
-## First-Time Setup
+```bash
+./helius init --currency USD
+./helius balance
+```
 
-If you launch `helius.exe` with no existing database, Helius now prompts for a
-currency code and initializes the default database automatically. You can still
-set it up manually:
+On first run, `helius` can initialize the database automatically. You can also set it up explicitly:
 
 ```powershell
 helius init --currency USD
@@ -160,7 +156,7 @@ Forms:
 - `Enter`, `Ctrl+S`, or `F2`: save
 - `Esc`: cancel
 
-## Main Commands
+## Examples
 
 Accounts and categories:
 
@@ -209,22 +205,31 @@ helius goal add "Cash Floor" --kind balance-target --account Checking --minimum-
 
 ## Storage
 
-Default database path on Windows:
+Default database locations:
 
 ```text
 %LOCALAPPDATA%\Helius\tracker.db
+~/.local/share/helius/tracker.db
 ```
+
+Notes:
+
+- Windows uses `%LOCALAPPDATA%\Helius\tracker.db`.
+- Linux uses the platform-local application data directory from `directories::ProjectDirs`, commonly `~/.local/share/helius/tracker.db`.
 
 Overrides:
 
 - `--db <path>`
 - `HELIUS_DB_PATH`
 
+## Development
+
+```powershell
+cargo test
+cargo build --release
+```
+
 ## License
 
 Copyright 2026 Kosta. This project is released under the GNU Affero General Public License v3.0.
 See [LICENSE](LICENSE).
-
-## Release Notes
-
-This repository is set up for binary distribution, not for publishing a library crate. Local build artifacts, demo databases, and machine-specific launchers should stay out of version control.

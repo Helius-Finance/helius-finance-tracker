@@ -140,7 +140,7 @@ fn strip_ansi_codes(text: &str) -> String {
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' && matches!(chars.peek(), Some('[')) {
             chars.next();
-            while let Some(next) = chars.next() {
+            for next in chars.by_ref() {
                 if ('@'..='~').contains(&next) {
                     break;
                 }

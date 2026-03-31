@@ -1,18 +1,14 @@
 # Contributing
 
-Thanks for taking an interest in Helius.
-
-Helius is a local-first personal finance tracker for Windows built in Rust. Contributions are welcome, but this repository is still evolving quickly, so the best contributions are usually small, concrete, and easy to review.
+Helius is a local-first personal finance tracker built in Rust.
 
 ## Before You Start
 
-For anything beyond a small typo, minor cleanup, or clearly scoped fix:
+For anything beyond a typo or a small isolated fix:
 
 1. open an issue first
 2. explain the problem you want to solve
 3. wait for alignment before doing larger work
-
-This helps avoid duplicate work and keeps the project focused.
 
 ## Good First Contributions
 
@@ -28,13 +24,25 @@ This helps avoid duplicate work and keeps the project focused.
 Requirements:
 
 - Rust stable
-- Windows development environment
+- Windows or Linux
 
 Clone the repo and run:
 
 ```powershell
 cargo test
 cargo build --release
+```
+
+CI runs on Windows and Ubuntu. If you touch startup, storage, or release behavior, also run the smoke script from a PowerShell session where local scripts are allowed. On Windows PowerShell 5.1, one option is `powershell -NoProfile -ExecutionPolicy Bypass`.
+
+```powershell
+./scripts/smoke.ps1
+```
+
+If you touch release packaging, run the host verification script before opening a pull request.
+
+```powershell
+./scripts/verify-host-release.ps1 -Platform windows-x86_64
 ```
 
 ## Project Layout
@@ -65,12 +73,12 @@ Before opening a pull request:
 - run `cargo test`
 - update docs if user-facing behavior changed
 - include screenshots or terminal output if the UI/UX changed materially
+- keep Windows behavior stable while adding Linux support
 
 ## What To Avoid
 
-Please avoid opening large speculative refactors or feature dumps without prior discussion.
-
-In particular, changes that affect storage, migrations, core workflow, or product direction should be discussed first.
+Avoid large speculative refactors or broad feature drops without prior discussion.
+Changes that affect storage, migrations, core workflow, or product direction should be discussed first.
 
 ## Reporting Bugs
 

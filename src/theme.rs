@@ -15,6 +15,9 @@ pub enum Tone {
     Selected,
 }
 
+type AnsiColor = (u8, u8, u8);
+type AnsiSpec = (Option<AnsiColor>, Option<AnsiColor>, bool);
+
 pub fn ansi_enabled() -> bool {
     env::var_os("NO_COLOR").is_none() && io::stdout().is_terminal()
 }
@@ -83,7 +86,7 @@ pub fn border_color(active: bool) -> Color {
     }
 }
 
-fn ansi_spec(tone: Tone) -> (Option<(u8, u8, u8)>, Option<(u8, u8, u8)>, bool) {
+fn ansi_spec(tone: Tone) -> AnsiSpec {
     match tone {
         Tone::Primary => (Some((255, 176, 0)), None, false),
         Tone::Header => (Some((255, 122, 0)), None, true),

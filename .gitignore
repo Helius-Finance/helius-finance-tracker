@@ -1,5 +1,7 @@
 /target/
 /dist/
+.tools/
+.wiki-publish/
 .env
 .env.*
 !.env.example
@@ -23,3 +25,6 @@ showcase.db-wal
 tmp_*.db
 scratch.txt
 src/ui.rs.bak
+assets/branding/.vs/
+assets/branding/*-preview.png
+phone-*.png

@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    name: Build Windows Artifact
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine release version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            "value=$env:GITHUB_REF_NAME" >> $env:GITHUB_OUTPUT
+          } else {
+            "value=manual-$env:GITHUB_RUN_NUMBER" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run test suite
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Run CLI smoke flow
+        shell: pwsh
+        run: |
+          if ($IsWindows) {
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+          }
+          ./scripts/smoke.ps1 -BinaryPath "${{ github.workspace }}/target/release/helius.exe"
+
+      - name: Package Windows release
+        id: package
+        shell: pwsh
+        run: |
+          $result = ./scripts/package-release.ps1 `
+            -BinaryPath "target/release/helius.exe" `
+            -Version "${{ steps.version.outputs.value }}" `
+            -Platform "windows-x86_64" `
+            -OutputRoot (Join-Path $env:RUNNER_TEMP "helius-windows")
+
+          "archive=$($result.ArchivePath)" >> $env:GITHUB_OUTPUT
+          "checksum=$($result.ChecksumPath)" >> $env:GITHUB_OUTPUT
+
+      - name: Smoke packaged Windows archive
+        shell: pwsh
+        run: |
+          ./scripts/verify-package.ps1 `
+            -ArchivePath "${{ steps.package.outputs.archive }}" `
+            -BinaryName "helius.exe"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+
+  build-linux:
+    name: Build Linux Artifact
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine release version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            "value=$env:GITHUB_REF_NAME" >> $env:GITHUB_OUTPUT
+          } else {
+            "value=manual-$env:GITHUB_RUN_NUMBER" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run test suite
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      - name: Run CLI smoke flow
+        shell: pwsh
+        run: |
+          if ($IsWindows) {
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+          }
+          ./scripts/smoke.ps1 -BinaryPath "${{ github.workspace }}/target/x86_64-unknown-linux-gnu/release/helius"
+
+      - name: Package Linux release
+        id: package
+        shell: pwsh
+        run: |
+          $result = ./scripts/package-release.ps1 `
+            -BinaryPath "target/x86_64-unknown-linux-gnu/release/helius" `
+            -Version "${{ steps.version.outputs.value }}" `
+            -Platform "linux-x86_64" `
+            -OutputRoot (Join-Path $env:RUNNER_TEMP "helius-linux")
+
+          "archive=$($result.ArchivePath)" >> $env:GITHUB_OUTPUT
+          "checksum=$($result.ChecksumPath)" >> $env:GITHUB_OUTPUT
+
+      - name: Smoke packaged Linux archive
+        shell: pwsh
+        run: |
+          ./scripts/verify-package.ps1 `
+            -ArchivePath "${{ steps.package.outputs.archive }}" `
+            -BinaryName "helius"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+
+  publish:
+    name: Publish GitHub Release
+    if: github.ref_type == 'tag'
+    needs:
+      - build-windows
+      - build-linux
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*
+          generate_release_notes: true

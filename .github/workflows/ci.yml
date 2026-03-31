@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            binary_name: helius.exe
+          - name: Linux
+            os: ubuntu-22.04
+            binary_name: helius
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run test suite
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Run CLI smoke flow
+        shell: pwsh
+        run: |
+          if ($IsWindows) {
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+          }
+          ./scripts/smoke.ps1 -BinaryPath "${{ github.workspace }}/target/release/${{ matrix.binary_name }}"

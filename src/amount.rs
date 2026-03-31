@@ -59,7 +59,7 @@ fn parse_amount_core(input: &str, allow_negative: bool) -> Result<i64, AppError>
 
     let cents = match fractional_part {
         None => 0,
-        Some(part) if part.is_empty() => 0,
+        Some("") => 0,
         Some(part) if part.len() == 1 && part.chars().all(|ch| ch.is_ascii_digit()) => {
             part.parse::<i64>().map_err(|_| {
                 AppError::Validation("amount is too large to fit in 64-bit cents".to_string())

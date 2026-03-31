@@ -184,8 +184,7 @@ impl Db {
             return Err(AppError::missing_db(path));
         }
 
-        // Older local databases can be missing newer tables even when metadata exists.
-        // Recreate any absent schema objects before applying versioned migrations.
+        // Recreate missing schema objects before versioned migrations.
         db.conn.execute_batch(FULL_SCHEMA_SQL)?;
         db.migrate_if_needed()?;
         db.repair_schema_if_needed()?;
@@ -333,8 +332,7 @@ impl Db {
         let account_id = self.resolve_account_ref(reference)?;
         if let Some(blocker) = self.account_archive_blocker(account_id)? {
             return Err(AppError::Validation(format!(
-                "cannot archive account while {} still reference it",
-                blocker
+                "cannot archive account while {blocker} still reference it"
             )));
         }
         let changed = self.conn.execute(
@@ -647,7 +645,7 @@ impl Db {
                 include_deleted,
                 limit
             ],
-            |row| map_transaction_row(row),
+            map_transaction_row,
         )?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -3456,7 +3454,7 @@ impl Db {
             let kind = if let Some(index) = type_index {
                 let raw_kind = optional_csv_value(&record, index).unwrap_or("").trim();
                 if raw_kind.is_empty() {
-                    plan.default_kind.unwrap_or_else(|| {
+                    plan.default_kind.unwrap_or({
                         if signed_amount < 0 {
                             TransactionKind::Expense
                         } else {
@@ -3467,7 +3465,7 @@ impl Db {
                     parse_import_kind(raw_kind)?
                 }
             } else {
-                plan.default_kind.unwrap_or_else(|| {
+                plan.default_kind.unwrap_or({
                     if signed_amount < 0 {
                         TransactionKind::Expense
                     } else {
@@ -4722,6 +4720,7 @@ impl Db {
             .map(|date| date.format("%Y-%m-%d").to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_recurring_next_due_on(
         &self,
         start_on: NaiveDate,
@@ -4849,6 +4848,7 @@ pub fn db_requires_init(path: &Path) -> Result<bool, AppError> {
 }
 
 fn default_db_path() -> Result<PathBuf, AppError> {
+    #[cfg(windows)]
     if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
         return Ok(PathBuf::from(local_app_data)
             .join("Helius")
@@ -5137,7 +5137,7 @@ fn required_csv_value<'a>(
     Ok(value)
 }
 
-fn optional_csv_value<'a>(record: &'a csv::StringRecord, index: usize) -> Option<&'a str> {
+fn optional_csv_value(record: &csv::StringRecord, index: usize) -> Option<&str> {
     record.get(index).filter(|value| !value.trim().is_empty())
 }
 
@@ -5583,5 +5583,86 @@ fn map_db_error(error: AppError) -> rusqlite::Error {
             error.to_string(),
         )),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    use super::resolve_db_path;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn reset_env_var(name: &str, original: Option<OsString>) {
+        match original {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
+    }
+
+    #[test]
+    fn explicit_db_path_beats_environment_override() {
+        let _guard = env_lock().lock().unwrap();
+        let original = env::var_os("HELIUS_DB_PATH");
+        env::set_var("HELIUS_DB_PATH", "ignored.db");
+
+        let explicit = PathBuf::from("custom.db");
+        let resolved = resolve_db_path(Some(explicit.clone())).unwrap();
+
+        reset_env_var("HELIUS_DB_PATH", original);
+        assert_eq!(resolved, explicit);
+    }
+
+    #[test]
+    fn environment_override_beats_default_db_path() {
+        let _guard = env_lock().lock().unwrap();
+        let original = env::var_os("HELIUS_DB_PATH");
+        let override_path = PathBuf::from("override-tracker.db");
+        env::set_var("HELIUS_DB_PATH", &override_path);
+
+        let resolved = resolve_db_path(None).unwrap();
+
+        reset_env_var("HELIUS_DB_PATH", original);
+        assert_eq!(resolved, override_path);
+    }
+
+    #[test]
+    fn default_db_path_uses_tracker_db_filename() {
+        let _guard = env_lock().lock().unwrap();
+        let original = env::var_os("HELIUS_DB_PATH");
+        env::remove_var("HELIUS_DB_PATH");
+
+        let resolved = resolve_db_path(None).unwrap();
+
+        reset_env_var("HELIUS_DB_PATH", original);
+        assert_eq!(
+            resolved.file_name().and_then(|value| value.to_str()),
+            Some("tracker.db")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_default_db_path_prefers_local_app_data() {
+        let _guard = env_lock().lock().unwrap();
+        let original_db = env::var_os("HELIUS_DB_PATH");
+        let original_local = env::var_os("LOCALAPPDATA");
+        let local_app_data = PathBuf::from(r"C:\Temp\HeliusTest");
+
+        env::remove_var("HELIUS_DB_PATH");
+        env::set_var("LOCALAPPDATA", &local_app_data);
+
+        let resolved = resolve_db_path(None).unwrap();
+
+        reset_env_var("LOCALAPPDATA", original_local);
+        reset_env_var("HELIUS_DB_PATH", original_db);
+        assert_eq!(resolved, local_app_data.join("Helius").join("tracker.db"));
+    }
 }
 // SPDX-License-Identifier: AGPL-3.0-only

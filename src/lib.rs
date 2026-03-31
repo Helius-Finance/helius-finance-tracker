@@ -89,8 +89,7 @@ fn ensure_interactive_db_ready(
     writeln!(stdout, "No database was found at {}.", db_path.display())?;
     writeln!(
         stdout,
-        "Enter a 3-letter currency code to initialize your local database [{}].",
-        DEFAULT_ONBOARDING_CURRENCY
+        "Enter a 3-letter currency code to initialize your local database [{DEFAULT_ONBOARDING_CURRENCY}]."
     )?;
     writeln!(
         stdout,

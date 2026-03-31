@@ -76,7 +76,7 @@ impl App {
             ),
             Span::raw("  "),
             Span::styled(
-                format!("BUDGET ALERTS {}", over_budget),
+                format!("BUDGET ALERTS {over_budget}"),
                 tone_style(if over_budget > 0 {
                     Tone::Negative
                 } else {
@@ -1299,7 +1299,7 @@ impl App {
                     tone_style(Tone::Primary),
                 ),
                 Span::raw("  "),
-                Span::styled(format!("LIMIT {}", limit), tone_style(Tone::Info)),
+                Span::styled(format!("LIMIT {limit}"), tone_style(Tone::Info)),
                 Span::raw("  "),
                 Span::styled(
                     format!(
@@ -1942,7 +1942,7 @@ impl App {
                 )));
                 for alert in &point.alerts {
                     lines.push(Line::from(Span::styled(
-                        format!("- {}", alert),
+                        format!("- {alert}"),
                         tone_style(Tone::Warning),
                     )));
                 }
@@ -1980,7 +1980,7 @@ impl App {
             )));
             for warning in self.planning_forecast.warnings.iter().take(4) {
                 lines.push(Line::from(Span::styled(
-                    format!("- {}", warning),
+                    format!("- {warning}"),
                     tone_style(Tone::Warning),
                 )));
             }
@@ -2539,10 +2539,7 @@ impl App {
 
     fn panel_block(&self, title: &'static str, active: bool) -> Block<'static> {
         Block::default()
-            .title(Span::styled(
-                format!(" {} ", title),
-                tone_style(Tone::Header),
-            ))
+            .title(Span::styled(format!(" {title} "), tone_style(Tone::Header)))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::border_color(active)))
             .style(theme::block_style())

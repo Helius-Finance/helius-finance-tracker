@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Local;
 
@@ -101,7 +101,7 @@ fn print_help(stdout: &mut dyn Write) -> Result<(), AppError> {
     Ok(())
 }
 
-fn prompt_init(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
+fn prompt_init(db_path: &Path, stdout: &mut dyn Write) -> Result<(), AppError> {
     let currency = prompt_required(stdout, "Currency code", Some("USD"))?;
     execute_cli(
         db_path,
@@ -110,7 +110,7 @@ fn prompt_init(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError
     )
 }
 
-fn prompt_account(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
+fn prompt_account(db_path: &Path, stdout: &mut dyn Write) -> Result<(), AppError> {
     let name = prompt_required(stdout, "Account name", None)?;
     let kind = prompt_required(
         stdout,
@@ -141,7 +141,7 @@ fn prompt_account(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppEr
     execute_cli(db_path, args, stdout)
 }
 
-fn prompt_category(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
+fn prompt_category(db_path: &Path, stdout: &mut dyn Write) -> Result<(), AppError> {
     let name = prompt_required(stdout, "Category name", None)?;
     let kind = prompt_required(stdout, "Category kind (income/expense)", Some("expense"))?;
     execute_cli(
@@ -157,11 +157,7 @@ fn prompt_category(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppE
     )
 }
 
-fn prompt_transaction(
-    db_path: &PathBuf,
-    kind: &str,
-    stdout: &mut dyn Write,
-) -> Result<(), AppError> {
+fn prompt_transaction(db_path: &Path, kind: &str, stdout: &mut dyn Write) -> Result<(), AppError> {
     let amount = prompt_required(stdout, "Amount", None)?;
     let date = prompt_required(stdout, "Date (YYYY-MM-DD)", Some(&today_iso()))?;
     let account = prompt_required(stdout, "Account", None)?;
@@ -201,7 +197,7 @@ fn prompt_transaction(
     execute_cli(db_path, args, stdout)
 }
 
-fn prompt_transactions(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
+fn prompt_transactions(db_path: &Path, stdout: &mut dyn Write) -> Result<(), AppError> {
     let account = prompt_optional(stdout, "Filter account", None)?;
     let from = prompt_optional(stdout, "From date (YYYY-MM-DD)", None)?;
     let to = prompt_optional(stdout, "To date (YYYY-MM-DD)", None)?;
@@ -232,7 +228,7 @@ fn prompt_transactions(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), 
     execute_cli(db_path, args, stdout)
 }
 
-fn prompt_summary_month(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
+fn prompt_summary_month(db_path: &Path, stdout: &mut dyn Write) -> Result<(), AppError> {
     let month = prompt_optional(stdout, "Month (YYYY-MM, blank = current month)", None)?;
     let account = prompt_optional(stdout, "Filter account", None)?;
 
@@ -248,7 +244,7 @@ fn prompt_summary_month(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(),
     execute_cli(db_path, args, stdout)
 }
 
-fn prompt_summary_range(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
+fn prompt_summary_range(db_path: &Path, stdout: &mut dyn Write) -> Result<(), AppError> {
     let from = prompt_required(stdout, "From date (YYYY-MM-DD)", None)?;
     let to = prompt_required(stdout, "To date (YYYY-MM-DD)", None)?;
     let account = prompt_optional(stdout, "Filter account", None)?;
@@ -269,7 +265,7 @@ fn prompt_summary_range(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(),
     execute_cli(db_path, args, stdout)
 }
 
-fn prompt_budget(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
+fn prompt_budget(db_path: &Path, stdout: &mut dyn Write) -> Result<(), AppError> {
     let category = prompt_required(stdout, "Expense category", None)?;
     let month = prompt_required(stdout, "Month (YYYY-MM)", Some(&today_iso()[..7]))?;
     let amount = prompt_required(stdout, "Budget amount", None)?;
@@ -288,7 +284,7 @@ fn prompt_budget(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppErr
     )
 }
 
-fn prompt_reconcile(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
+fn prompt_reconcile(db_path: &Path, stdout: &mut dyn Write) -> Result<(), AppError> {
     let account = prompt_required(stdout, "Account", None)?;
     let ending_on = prompt_required(
         stdout,
@@ -326,7 +322,7 @@ fn prompt_reconcile(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), App
     execute_cli(db_path, args, stdout)
 }
 
-fn prompt_recurring(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
+fn prompt_recurring(db_path: &Path, stdout: &mut dyn Write) -> Result<(), AppError> {
     let name = prompt_required(stdout, "Rule name", None)?;
     let kind = prompt_required(stdout, "Type (income/expense/transfer)", Some("expense"))?;
     let amount = prompt_required(stdout, "Amount", None)?;
@@ -399,7 +395,7 @@ fn prompt_recurring(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), App
     execute_cli(db_path, args, stdout)
 }
 
-fn prompt_recurring_run(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(), AppError> {
+fn prompt_recurring_run(db_path: &Path, stdout: &mut dyn Write) -> Result<(), AppError> {
     let through = prompt_optional(
         stdout,
         "Post due items through (YYYY-MM-DD)",
@@ -412,17 +408,13 @@ fn prompt_recurring_run(db_path: &PathBuf, stdout: &mut dyn Write) -> Result<(),
     }
     execute_cli(db_path, args, stdout)
 }
-fn execute_raw_cli(db_path: &PathBuf, input: &str, stdout: &mut dyn Write) -> Result<(), AppError> {
+fn execute_raw_cli(db_path: &Path, input: &str, stdout: &mut dyn Write) -> Result<(), AppError> {
     let tokens = shlex::split(input)
         .ok_or_else(|| AppError::Validation("invalid quoting in command".to_string()))?;
     execute_cli(db_path, tokens, stdout)
 }
 
-fn execute_cli(
-    db_path: &PathBuf,
-    args: Vec<String>,
-    stdout: &mut dyn Write,
-) -> Result<(), AppError> {
+fn execute_cli(db_path: &Path, args: Vec<String>, stdout: &mut dyn Write) -> Result<(), AppError> {
     let mut argv = vec![
         "helius".to_string(),
         "--db".to_string(),

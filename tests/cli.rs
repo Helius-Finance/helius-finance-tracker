@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use assert_cmd::Command;
+use chrono::{Datelike, Duration, Local, NaiveDate};
 use predicates::prelude::*;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -9,6 +10,43 @@ use tempfile::TempDir;
 
 fn db_path(temp_dir: &TempDir) -> PathBuf {
     temp_dir.path().join("tracker.db")
+}
+
+fn today() -> NaiveDate {
+    Local::now().date_naive()
+}
+
+fn date_text(date: NaiveDate) -> String {
+    date.format("%Y-%m-%d").to_string()
+}
+
+fn month_id(date: NaiveDate) -> String {
+    date.format("%Y-%m").to_string()
+}
+
+fn month_start(date: NaiveDate) -> NaiveDate {
+    NaiveDate::from_ymd_opt(date.year(), date.month(), 1).expect("valid month start")
+}
+
+fn add_months(date: NaiveDate, months_to_add: i32, day: u32) -> NaiveDate {
+    let month_index = date.year() * 12 + date.month0() as i32 + months_to_add;
+    let year = month_index.div_euclid(12);
+    let month0 = month_index.rem_euclid(12) as u32;
+    NaiveDate::from_ymd_opt(year, month0 + 1, day).expect("valid recurring day")
+}
+
+fn next_due_on(start_on: NaiveDate, day_of_month: u32) -> NaiveDate {
+    let candidate = NaiveDate::from_ymd_opt(start_on.year(), start_on.month(), day_of_month)
+        .expect("valid recurring day");
+    if candidate >= start_on {
+        candidate
+    } else {
+        add_months(candidate, 1, day_of_month)
+    }
+}
+
+fn due_day() -> u32 {
+    (today().day() + 1).min(28)
 }
 
 fn run_ok(temp_dir: &TempDir, args: &[&str]) -> String {
@@ -918,6 +956,10 @@ fn budget_account_mapping_and_plan_item_post_round_trip() {
 fn forecast_show_includes_bills_goals_and_recurring_items() {
     let temp_dir = TempDir::new().unwrap();
     seed_basic_data(&temp_dir);
+    let current_month = month_id(today());
+    let recurring_day = due_day().to_string();
+    let recurring_start_on = date_text(month_start(today()));
+    let insurance_due_on = date_text(today() + Duration::days(7));
 
     run_ok(
         &temp_dir,
@@ -926,7 +968,7 @@ fn forecast_show_includes_bills_goals_and_recurring_items() {
             "set",
             "Groceries",
             "--month",
-            "2026-03",
+            current_month.as_str(),
             "--amount",
             "200.00",
             "--account",
@@ -964,9 +1006,9 @@ fn forecast_show_includes_bills_goals_and_recurring_items() {
             "--cadence",
             "monthly",
             "--day-of-month",
-            "20",
+            recurring_day.as_str(),
             "--start-on",
-            "2026-03-01",
+            recurring_start_on.as_str(),
         ],
     );
     run_ok(
@@ -981,7 +1023,7 @@ fn forecast_show_includes_bills_goals_and_recurring_items() {
             "--amount",
             "240.00",
             "--date",
-            "2026-03-22",
+            insurance_due_on.as_str(),
             "--account",
             "Checking",
             "--category",
@@ -1014,6 +1056,7 @@ fn forecast_show_includes_bills_goals_and_recurring_items() {
 fn scenario_specific_planning_items_change_the_forecast() {
     let temp_dir = TempDir::new().unwrap();
     seed_basic_data(&temp_dir);
+    let downside_due_on = date_text(today() + Duration::days(5));
 
     run_ok(&temp_dir, &["scenario", "add", "Downside"]);
     run_ok(
@@ -1030,7 +1073,7 @@ fn scenario_specific_planning_items_change_the_forecast() {
             "--amount",
             "700.00",
             "--date",
-            "2026-03-24",
+            downside_due_on.as_str(),
             "--account",
             "Checking",
             "--category",
@@ -1136,6 +1179,7 @@ fn scenario_commands_edit_and_archive_cleanly() {
 fn scenario_budget_overrides_change_budget_views_and_forecast() {
     let temp_dir = TempDir::new().unwrap();
     seed_basic_data(&temp_dir);
+    let current_month = month_id(today());
 
     run_ok(
         &temp_dir,
@@ -1144,7 +1188,7 @@ fn scenario_budget_overrides_change_budget_views_and_forecast() {
             "set",
             "Groceries",
             "--month",
-            "2026-03",
+            current_month.as_str(),
             "--amount",
             "200.00",
             "--account",
@@ -1159,7 +1203,7 @@ fn scenario_budget_overrides_change_budget_views_and_forecast() {
             "set",
             "Groceries",
             "--month",
-            "2026-03",
+            current_month.as_str(),
             "--amount",
             "500.00",
             "--scenario",
@@ -1169,7 +1213,13 @@ fn scenario_budget_overrides_change_budget_views_and_forecast() {
 
     let baseline_budgets: Value = serde_json::from_str(&run_ok(
         &temp_dir,
-        &["budget", "list", "--month", "2026-03", "--json"],
+        &[
+            "budget",
+            "list",
+            "--month",
+            current_month.as_str(),
+            "--json",
+        ],
     ))
     .unwrap();
     let baseline_row = baseline_budgets.as_array().unwrap().first().unwrap();
@@ -1183,7 +1233,7 @@ fn scenario_budget_overrides_change_budget_views_and_forecast() {
             "budget",
             "list",
             "--month",
-            "2026-03",
+            current_month.as_str(),
             "--scenario",
             "Stress",
             "--json",
@@ -1201,7 +1251,7 @@ fn scenario_budget_overrides_change_budget_views_and_forecast() {
         &[
             "budget",
             "status",
-            "2026-03",
+            current_month.as_str(),
             "--scenario",
             "Stress",
             "--json",
@@ -1250,7 +1300,7 @@ fn scenario_budget_overrides_change_budget_views_and_forecast() {
             "delete",
             "Groceries",
             "--month",
-            "2026-03",
+            current_month.as_str(),
             "--scenario",
             "Stress",
         ],
@@ -1262,7 +1312,7 @@ fn scenario_budget_overrides_change_budget_views_and_forecast() {
             "budget",
             "list",
             "--month",
-            "2026-03",
+            current_month.as_str(),
             "--scenario",
             "Stress",
             "--json",
@@ -1516,6 +1566,13 @@ fn recurring_rules_accept_explicit_next_due_on() {
 #[test]
 fn forecast_show_does_not_advance_recurring_next_due_on() {
     let temp_dir = TempDir::new().unwrap();
+    let today = today();
+    let recurring_day = due_day();
+    let expected_due_on = next_due_on(today, recurring_day);
+    let expected_due_on_text = date_text(expected_due_on);
+    let start_on = date_text(today);
+    let recurring_day_text = recurring_day.to_string();
+
     run_ok(&temp_dir, &["init", "--currency", "USD"]);
     run_ok(
         &temp_dir,
@@ -1542,27 +1599,47 @@ fn forecast_show_does_not_advance_recurring_next_due_on() {
             "--cadence",
             "monthly",
             "--day-of-month",
-            "6",
+            recurring_day_text.as_str(),
             "--start-on",
-            "2026-03-17",
+            start_on.as_str(),
         ],
     );
 
     let before: Value =
         serde_json::from_str(&run_ok(&temp_dir, &["recurring", "list", "--json"])).unwrap();
-    assert_eq!(before.as_array().unwrap()[0]["next_due_on"], "2026-04-06");
+    assert_eq!(
+        before.as_array().unwrap()[0]["next_due_on"]
+            .as_str()
+            .unwrap(),
+        expected_due_on_text
+    );
 
     let _forecast: Value =
         serde_json::from_str(&run_ok(&temp_dir, &["forecast", "show", "--json"])).unwrap();
 
     let after: Value =
         serde_json::from_str(&run_ok(&temp_dir, &["recurring", "list", "--json"])).unwrap();
-    assert_eq!(after.as_array().unwrap()[0]["next_due_on"], "2026-04-06");
+    assert_eq!(
+        after.as_array().unwrap()[0]["next_due_on"]
+            .as_str()
+            .unwrap(),
+        expected_due_on_text
+    );
 }
 
 #[test]
 fn recurring_list_prefers_pending_occurrence_over_stored_next_pointer() {
     let temp_dir = TempDir::new().unwrap();
+    let today = today();
+    let recurring_day = due_day();
+    let pending_due_on = next_due_on(today, recurring_day);
+    let pending_due_on_text = date_text(pending_due_on);
+    let far_future_due_on = date_text(add_months(pending_due_on, 12, recurring_day));
+    let created_at = format!("{}T12:00:00+00:00", date_text(today));
+    let updated_at = format!("{}T12:00:01+00:00", date_text(today));
+    let start_on = date_text(today);
+    let recurring_day_text = recurring_day.to_string();
+
     run_ok(&temp_dir, &["init", "--currency", "USD"]);
     run_ok(
         &temp_dir,
@@ -1589,33 +1666,42 @@ fn recurring_list_prefers_pending_occurrence_over_stored_next_pointer() {
             "--cadence",
             "monthly",
             "--day-of-month",
-            "6",
+            recurring_day_text.as_str(),
             "--start-on",
-            "2026-03-17",
+            start_on.as_str(),
         ],
     );
+
+    let rules: Value =
+        serde_json::from_str(&run_ok(&temp_dir, &["recurring", "list", "--json"])).unwrap();
+    let rule_id = rules.as_array().unwrap()[0]["id"].as_i64().unwrap();
 
     let connection = Connection::open(db_path(&temp_dir)).unwrap();
     connection
         .execute(
             "INSERT INTO recurring_occurrences (rule_id, due_on, transaction_id, status, created_at)
-             VALUES (1, '2026-04-06', NULL, 'pending', '2026-03-17T12:00:00+02:00')",
-            [],
+             VALUES (?1, ?2, NULL, 'pending', ?3)",
+            rusqlite::params![rule_id, pending_due_on_text.as_str(), created_at],
         )
         .unwrap();
     connection
         .execute(
             "UPDATE recurring_rules
-             SET next_due_on = '2027-03-06',
-                 updated_at = '2026-03-17T12:00:01+02:00'
-             WHERE id = 1",
-            [],
+             SET next_due_on = ?1,
+                 updated_at = ?2
+             WHERE id = ?3",
+            rusqlite::params![far_future_due_on, updated_at, rule_id],
         )
         .unwrap();
 
     let rules: Value =
         serde_json::from_str(&run_ok(&temp_dir, &["recurring", "list", "--json"])).unwrap();
-    assert_eq!(rules.as_array().unwrap()[0]["next_due_on"], "2026-04-06");
+    assert_eq!(
+        rules.as_array().unwrap()[0]["next_due_on"]
+            .as_str()
+            .unwrap(),
+        pending_due_on_text
+    );
 }
 
 #[test]

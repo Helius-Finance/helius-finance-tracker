@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 420" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Helius logo</title>
+  <desc id="desc">The Helius wordmark paired with a refined solar monogram on a dark terminal-inspired panel.</desc>
+  <defs>
+    <linearGradient id="ring" x1="110" y1="96" x2="404" y2="410" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF7A00"/>
+      <stop offset="1" stop-color="#FFB000"/>
+    </linearGradient>
+    <linearGradient id="core" x1="158" y1="142" x2="354" y2="370" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFD46B"/>
+      <stop offset="1" stop-color="#FF9B18"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="16" y="16" width="1368" height="388" rx="36" fill="#0A0A0A"/>
+  <rect x="16.5" y="16.5" width="1367" height="387" rx="35.5" stroke="#1A1A1A"/>
+  <path d="M58 62H228" stroke="#FF8A0A" stroke-width="2" stroke-linecap="round"/>
+  <path d="M348 104V320" stroke="#202020" stroke-width="2" stroke-linecap="round"/>
+
+  <g transform="translate(54 40) scale(0.6)">
+    <circle
+      cx="256"
+      cy="256"
+      r="184"
+      stroke="url(#ring)"
+      stroke-width="24"
+      stroke-linecap="round"
+      stroke-dasharray="1042 126"
+      transform="rotate(-46 256 256)"
+    />
+    <circle cx="390" cy="136" r="16" fill="#FFD46B"/>
+    <circle cx="390" cy="136" r="7" fill="#FF7A00"/>
+    <rect x="150" y="142" width="58" height="228" rx="18" fill="url(#core)"/>
+    <rect x="304" y="142" width="58" height="228" rx="18" fill="url(#core)"/>
+    <rect x="196" y="236" width="120" height="40" rx="16" fill="#FF9B18"/>
+    <rect x="196" y="236" width="120" height="40" rx="16" fill="#FFF4DA" fill-opacity="0.12"/>
+  </g>
+
+  <text x="404" y="142" fill="#FFB657" font-family="'Segoe UI', Arial, sans-serif" font-size="24" font-weight="600" letter-spacing="7">LOCAL-FIRST FINANCE</text>
+  <text x="400" y="244" fill="#F4E9D0" font-family="'Segoe UI', Arial, sans-serif" font-size="118" font-weight="700" letter-spacing="6">HELIUS</text>
+</svg>
