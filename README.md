@@ -229,5 +229,5 @@ cargo build --release
 
 ## License
 
-Copyright 2026 Kosta. This project is released under the GNU Affero General Public License v3.0.
+Copyright 2026 Kostas. This project is released under the GNU Affero General Public License v3.0.
 See [LICENSE](LICENSE).
