@@ -26,8 +26,8 @@ Supported targets: Windows x86_64 and Linux x86_64.
 
 1. Open the [GitHub Releases](https://github.com/STVR393/helius-personal-finance-tracker/releases) page.
 2. Download the archive for your platform:
-   - Windows x86_64: `helius-v1.4.1-windows-x86_64.zip`
-   - Linux x86_64: `helius-v1.4.1-linux-x86_64.tar.gz`
+   - Windows x86_64: `helius-v1.4.2-windows-x86_64.zip`
+   - Linux x86_64: `helius-v1.4.1-2inux-x86_64.tar.gz`
 3. Extract the archive into a folder you keep for apps or tools.
 4. Launch the binary for your platform:
 
