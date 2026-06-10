@@ -86,7 +86,7 @@ Date completed,Amount,Description,Merchant,Reference
     Invoke-Docker -Arguments @("run", "--rm", "-v", $volumeSpec, $ImageTag, "init", "--currency", "EUR")
     Invoke-Docker -Arguments @("run", "--rm", "-v", $volumeSpec, $ImageTag, "account", "add", "Checking", "--type", "checking")
 
-    $presetListJson = docker run --rm -v $volumeSpec $ImageTag import csv --list-presets --json
+    $presetListJson = (docker run --rm -v $volumeSpec $ImageTag import csv --list-presets --json) -join "`n"
     if ($LASTEXITCODE -ne 0) {
         throw "Docker preset listing failed."
     }
@@ -95,7 +95,7 @@ Date completed,Amount,Description,Merchant,Reference
         throw "Docker smoke expected revolut-csv to appear in the preset list."
     }
 
-    $csvImportJson = docker run --rm -v $volumeSpec $ImageTag import csv --input /data/revolut.csv --account Checking --preset revolut-csv --json
+    $csvImportJson = (docker run --rm -v $volumeSpec $ImageTag import csv --input /data/revolut.csv --account Checking --preset revolut-csv --json) -join "`n"
     if ($LASTEXITCODE -ne 0) {
         throw "Docker preset CSV import failed."
     }
@@ -104,7 +104,7 @@ Date completed,Amount,Description,Merchant,Reference
         throw "Docker smoke expected preset CSV import to create 2 rows."
     }
 
-    $camtImportJson = docker run --rm -v $volumeSpec $ImageTag import camt053 --input /data/statement.xml --account Checking --json
+    $camtImportJson = (docker run --rm -v $volumeSpec $ImageTag import camt053 --input /data/statement.xml --account Checking --json) -join "`n"
     if ($LASTEXITCODE -ne 0) {
         throw "Docker camt053 import failed."
     }
@@ -113,7 +113,7 @@ Date completed,Amount,Description,Merchant,Reference
         throw "Docker smoke expected camt053 import to create 1 row."
     }
 
-    $transactionsJson = docker run --rm -v $volumeSpec $ImageTag tx list --json
+    $transactionsJson = (docker run --rm -v $volumeSpec $ImageTag tx list --json) -join "`n"
     if ($LASTEXITCODE -ne 0) {
         throw "Docker transaction listing failed."
     }

@@ -1273,7 +1273,7 @@ impl App {
             .constraints([
                 Constraint::Length(4),
                 Constraint::Min(8),
-                Constraint::Length(4),
+                Constraint::Length(5),
             ])
             .split(area);
         let field_height = layout[1].height.saturating_sub(2) as usize;
