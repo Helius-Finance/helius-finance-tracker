@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 use crate::model::{
-    AccountKind, CategoryKind, ExportKind, PlanningGoalKind, RecurringCadence, TransactionKind,
-    Weekday,
+    AccountKind, CategoryKind, ExportKind, ImportDefaultKind, PlanningGoalKind, RecurringCadence,
+    TransactionKind, Weekday,
 };
 
 #[derive(Debug, Parser)]
@@ -306,26 +306,40 @@ pub struct ExportCsvArgs {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum ImportCommand {
     Csv(ImportCsvArgs),
+    Camt053(ImportCamt053Args),
 }
 
 #[derive(Debug, Args)]
 pub struct ImportCsvArgs {
     #[arg(long)]
-    pub input: PathBuf,
+    pub input: Option<PathBuf>,
     #[arg(long)]
-    pub account: String,
+    pub account: Option<String>,
     #[arg(long)]
-    pub date_column: String,
+    pub preset: Option<String>,
     #[arg(long)]
-    pub amount_column: String,
+    pub list_presets: bool,
     #[arg(long)]
-    pub description_column: String,
+    pub date_column: Option<String>,
+    #[arg(long)]
+    pub amount_column: Option<String>,
+    #[arg(long)]
+    pub debit_column: Option<String>,
+    #[arg(long)]
+    pub credit_column: Option<String>,
+    #[arg(long)]
+    pub description_column: Option<String>,
     #[arg(long)]
     pub category_column: Option<String>,
     #[arg(long)]
     pub category: Option<String>,
+    #[arg(long)]
+    pub income_category: Option<String>,
+    #[arg(long)]
+    pub expense_category: Option<String>,
     #[arg(long)]
     pub payee_column: Option<String>,
     #[arg(long)]
@@ -333,11 +347,29 @@ pub struct ImportCsvArgs {
     #[arg(long)]
     pub type_column: Option<String>,
     #[arg(long, value_enum)]
-    pub default_type: Option<TransactionKind>,
-    #[arg(long, default_value = "%Y-%m-%d")]
-    pub date_format: String,
-    #[arg(long, default_value = ",")]
-    pub delimiter: char,
+    pub default_type: Option<ImportDefaultKind>,
+    #[arg(long)]
+    pub date_format: Option<String>,
+    #[arg(long)]
+    pub delimiter: Option<char>,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub allow_duplicates: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ImportCamt053Args {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long)]
+    pub account: String,
+    #[arg(long)]
+    pub income_category: Option<String>,
+    #[arg(long)]
+    pub expense_category: Option<String>,
     #[arg(long)]
     pub dry_run: bool,
     #[arg(long)]

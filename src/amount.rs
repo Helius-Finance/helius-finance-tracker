@@ -3,15 +3,16 @@ use crate::error::AppError;
 pub fn parse_amount_to_cents(input: &str) -> Result<i64, AppError> {
     let amount_cents = parse_amount_core(input, false)?;
     if amount_cents <= 0 {
-        return Err(AppError::Validation("amount must be positive".to_string()));
+        return Err(AppError::field_validation("amount", "must be positive"));
     }
     Ok(amount_cents)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_signed_amount_to_cents(input: &str) -> Result<i64, AppError> {
     let amount_cents = parse_amount_core(input, true)?;
     if amount_cents == 0 {
-        return Err(AppError::Validation("amount cannot be zero".to_string()));
+        return Err(AppError::field_validation("amount", "cannot be zero"));
     }
     Ok(amount_cents)
 }
@@ -23,12 +24,12 @@ pub fn parse_balance_to_cents(input: &str) -> Result<i64, AppError> {
 fn parse_amount_core(input: &str, allow_negative: bool) -> Result<i64, AppError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(AppError::Validation("amount cannot be empty".to_string()));
+        return Err(AppError::field_validation("amount", "cannot be empty"));
     }
 
     let (sign, unsigned) = if let Some(value) = trimmed.strip_prefix('-') {
         if !allow_negative {
-            return Err(AppError::Validation("amount must be positive".to_string()));
+            return Err(AppError::field_validation("amount", "must be positive"));
         }
         (-1_i64, value)
     } else {
@@ -38,41 +39,44 @@ fn parse_amount_core(input: &str, allow_negative: bool) -> Result<i64, AppError>
     let mut parts = unsigned.split('.');
     let whole_part = parts
         .next()
-        .ok_or_else(|| AppError::Validation("amount cannot be empty".to_string()))?;
+        .ok_or_else(|| AppError::field_validation("amount", "cannot be empty"))?;
     let fractional_part = parts.next();
 
     if parts.next().is_some() {
-        return Err(AppError::Validation(
-            "amount can contain at most one decimal point".to_string(),
+        return Err(AppError::field_validation(
+            "amount",
+            "can contain at most one decimal point",
         ));
     }
 
     if whole_part.is_empty() || !whole_part.chars().all(|ch| ch.is_ascii_digit()) {
-        return Err(AppError::Validation(
-            "amount must contain only digits and an optional decimal point".to_string(),
+        return Err(AppError::field_validation(
+            "amount",
+            "must contain only digits and an optional decimal point",
         ));
     }
 
-    let dollars: i64 = whole_part.parse().map_err(|_| {
-        AppError::Validation("amount is too large to fit in 64-bit cents".to_string())
-    })?;
+    let dollars: i64 = whole_part
+        .parse()
+        .map_err(|_| AppError::field_validation("amount", "is too large to fit in 64-bit cents"))?;
 
     let cents = match fractional_part {
         None => 0,
         Some("") => 0,
         Some(part) if part.len() == 1 && part.chars().all(|ch| ch.is_ascii_digit()) => {
             part.parse::<i64>().map_err(|_| {
-                AppError::Validation("amount is too large to fit in 64-bit cents".to_string())
+                AppError::field_validation("amount", "is too large to fit in 64-bit cents")
             })? * 10
         }
         Some(part) if part.len() == 2 && part.chars().all(|ch| ch.is_ascii_digit()) => {
             part.parse::<i64>().map_err(|_| {
-                AppError::Validation("amount is too large to fit in 64-bit cents".to_string())
+                AppError::field_validation("amount", "is too large to fit in 64-bit cents")
             })?
         }
         Some(_) => {
-            return Err(AppError::Validation(
-                "amount can use at most two decimal places".to_string(),
+            return Err(AppError::field_validation(
+                "amount",
+                "can use at most two decimal places",
             ))
         }
     };
@@ -81,12 +85,11 @@ fn parse_amount_core(input: &str, allow_negative: bool) -> Result<i64, AppError>
         .checked_mul(100)
         .and_then(|value| value.checked_add(cents))
         .ok_or_else(|| {
-            AppError::Validation("amount is too large to fit in 64-bit cents".to_string())
+            AppError::field_validation("amount", "is too large to fit in 64-bit cents")
         })?;
 
-    sign.checked_mul(absolute_cents).ok_or_else(|| {
-        AppError::Validation("amount is too large to fit in 64-bit cents".to_string())
-    })
+    sign.checked_mul(absolute_cents)
+        .ok_or_else(|| AppError::field_validation("amount", "is too large to fit in 64-bit cents"))
 }
 
 pub fn format_cents(amount_cents: i64) -> String {

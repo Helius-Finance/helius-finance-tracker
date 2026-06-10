@@ -9,7 +9,7 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use crate::amount::format_cents;
-use crate::model::TransactionKind;
+use crate::model::{CsvAmountStrategy, ImportPlan, TransactionKind};
 use crate::theme::{self, tone_style, Tone};
 
 use super::app::{App, PlanningSubview, View};
@@ -792,7 +792,7 @@ impl App {
             Line::from("Work directly in the app"),
             Line::from("  N adds from the current panel."),
             Line::from("  E edits the selected account, transaction, category, recurring rule, or budget."),
-            Line::from("  I opens CSV import from TRANSACTIONS or ACCOUNTS."),
+            Line::from("  I opens import from TRANSACTIONS or ACCOUNTS."),
             Line::from("  F or / opens transaction filters from TRANSACTIONS."),
             Line::from("  C clears transaction filters from TRANSACTIONS."),
             Line::from("  R starts reconciliation from ACCOUNTS or RECONCILE."),
@@ -911,69 +911,115 @@ impl App {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(6),
+                Constraint::Length(7),
                 Constraint::Min(8),
                 Constraint::Length(3),
             ])
             .split(area);
 
-        let summary_lines = vec![
-            Line::from(Span::styled("CSV IMPORT PREVIEW", tone_style(Tone::Header))),
-            Line::from(Span::styled(
-                format!(
-                    "FILE {} | ACCOUNT {}",
-                    review.plan.path.display(),
-                    review.plan.account
-                ),
-                tone_style(Tone::Primary),
-            )),
-            Line::from(vec![
-                Span::styled("READY ", tone_style(Tone::Muted)),
-                Span::styled(
-                    review.preview.imported_count.to_string(),
-                    tone_style(Tone::Positive),
-                ),
-                Span::raw("  "),
-                Span::styled("DUPLICATES ", tone_style(Tone::Muted)),
-                Span::styled(
-                    review.preview.duplicate_count.to_string(),
-                    tone_style(if review.preview.duplicate_count > 0 {
-                        Tone::Warning
-                    } else {
-                        Tone::Positive
-                    }),
-                ),
-                Span::raw("  "),
-                Span::styled("ALLOW DUPES ", tone_style(Tone::Muted)),
-                Span::styled(
-                    if review.plan.allow_duplicates {
-                        "yes"
-                    } else {
-                        "no"
-                    },
-                    tone_style(Tone::Info),
-                ),
-            ]),
-            Line::from(Span::styled(
-                format!(
-                    "DATE {} | AMOUNT {} | DESC {} | CATEGORY {}",
-                    review.plan.date_column,
-                    review.plan.amount_column,
-                    review.plan.description_column,
-                    review
-                        .plan
-                        .category_column
-                        .clone()
-                        .or_else(|| review.plan.category.clone())
-                        .unwrap_or_else(|| "-".to_string())
-                ),
-                tone_style(Tone::Muted),
-            )),
-        ];
+        let plan_summary = match &review.plan {
+            ImportPlan::Csv(plan) => {
+                let amount_text = match &plan.amount_strategy {
+                    CsvAmountStrategy::Signed { amount_column } => {
+                        format!("AMOUNT {}", amount_column.name)
+                    }
+                    CsvAmountStrategy::Split {
+                        debit_column,
+                        credit_column,
+                    } => format!(
+                        "DEBIT {} | CREDIT {}",
+                        debit_column.name, credit_column.name
+                    ),
+                };
+                let fallback = plan
+                    .expense_category
+                    .clone()
+                    .or_else(|| plan.category.clone())
+                    .unwrap_or_else(|| "Uncategorized Expense".to_string());
+                vec![
+                    Line::from(Span::styled("CSV IMPORT PREVIEW", tone_style(Tone::Header))),
+                    Line::from(Span::styled(
+                        format!("FILE {} | ACCOUNT {}", plan.path.display(), plan.account),
+                        tone_style(Tone::Primary),
+                    )),
+                    Line::from(Span::styled(
+                        format!(
+                            "PRESET {} | DATE {} | DESC {}",
+                            plan.preset_id.clone().unwrap_or_else(|| "-".to_string()),
+                            plan.date_column.name,
+                            plan.description_column.name
+                        ),
+                        tone_style(Tone::Muted),
+                    )),
+                    Line::from(Span::styled(
+                        format!(
+                            "{} | CATEGORY {} | FALLBACK {}",
+                            amount_text,
+                            plan.category_column
+                                .as_ref()
+                                .map(|column| column.name.clone())
+                                .unwrap_or_else(|| "-".to_string()),
+                            fallback
+                        ),
+                        tone_style(Tone::Muted),
+                    )),
+                ]
+            }
+            ImportPlan::Camt053(plan) => vec![
+                Line::from(Span::styled(
+                    "CAMT053 IMPORT PREVIEW",
+                    tone_style(Tone::Header),
+                )),
+                Line::from(Span::styled(
+                    format!("FILE {} | ACCOUNT {}", plan.path.display(), plan.account),
+                    tone_style(Tone::Primary),
+                )),
+                Line::from(Span::styled(
+                    format!(
+                        "EXPENSE {} | INCOME {}",
+                        plan.expense_category
+                            .clone()
+                            .unwrap_or_else(|| "Uncategorized Expense".to_string()),
+                        plan.income_category
+                            .clone()
+                            .unwrap_or_else(|| "Uncategorized Income".to_string())
+                    ),
+                    tone_style(Tone::Muted),
+                )),
+            ],
+        };
+        let mut summary_lines = plan_summary;
+        summary_lines.push(Line::from(vec![
+            Span::styled("READY ", tone_style(Tone::Muted)),
+            Span::styled(
+                review.preview.imported_count.to_string(),
+                tone_style(Tone::Positive),
+            ),
+            Span::raw("  "),
+            Span::styled("DUPLICATES ", tone_style(Tone::Muted)),
+            Span::styled(
+                review.preview.duplicate_count.to_string(),
+                tone_style(if review.preview.duplicate_count > 0 {
+                    Tone::Warning
+                } else {
+                    Tone::Positive
+                }),
+            ),
+            Span::raw("  "),
+            Span::styled("ALLOW DUPES ", tone_style(Tone::Muted)),
+            Span::styled(
+                if review.plan.allow_duplicates() {
+                    "yes"
+                } else {
+                    "no"
+                },
+                tone_style(Tone::Info),
+            ),
+        ]));
 
         let items: Vec<ListItem<'static>> = if review.preview.preview.is_empty() {
             vec![ListItem::new(Line::from(Span::styled(
-                "No rows were found in the CSV preview.",
+                "No rows were found in the import preview.",
                 tone_style(Tone::Muted),
             )))]
         } else {

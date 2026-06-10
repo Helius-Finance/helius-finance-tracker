@@ -7,18 +7,18 @@ use chrono::{Datelike, Duration, Local, NaiveDate, Weekday as ChronoWeekday};
 use directories::ProjectDirs;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
-use crate::error::AppError;
+use crate::error::{AppError, EntityKind};
+use crate::importer::load_import_rows;
 use crate::model::{
     Account, AccountKind, BalanceRecord, BalanceTrendPoint, BillCalendarItem, BudgetRecord,
-    BudgetStatusRecord, Category, CategoryKind, CategorySpendingPoint, CsvImportPlan,
-    CsvImportResult, ForecastDailyPoint, ForecastMonthlyPoint, ForecastSelection, ForecastSnapshot,
-    GoalStatusRecord, ImportedTransactionRow, MonthlyCashFlowPoint, NewPlanningGoal,
-    NewPlanningItem, NewPlanningScenario, NewRecurringRule, NewTransaction, OccurrenceStatus,
-    PlanningGoalKind, PlanningGoalRecord, PlanningItemRecord, PlanningScenarioRecord,
-    ReconciliationRecord, RecurringCadence, RecurringOccurrenceRecord, RecurringRuleRecord,
-    SummaryRecord, TransactionFilters, TransactionKind, TransactionRecord, UpdatePlanningGoal,
-    UpdatePlanningItem, UpdatePlanningScenario, UpdateRecurringRule, UpdateTransaction, Weekday,
-    WeeklyBalancePoint,
+    BudgetStatusRecord, Category, CategoryKind, CategorySpendingPoint, ForecastDailyPoint,
+    ForecastMonthlyPoint, ForecastSelection, ForecastSnapshot, GoalStatusRecord, ImportPlan,
+    ImportResult, ImportedTransactionRow, MonthlyCashFlowPoint, NewPlanningGoal, NewPlanningItem,
+    NewPlanningScenario, NewRecurringRule, NewTransaction, OccurrenceStatus, PlanningGoalKind,
+    PlanningGoalRecord, PlanningItemRecord, PlanningScenarioRecord, ReconciliationRecord,
+    RecurringCadence, RecurringOccurrenceRecord, RecurringRuleRecord, SummaryRecord,
+    TransactionFilters, TransactionKind, TransactionRecord, UpdatePlanningGoal, UpdatePlanningItem,
+    UpdatePlanningScenario, UpdateRecurringRule, UpdateTransaction, Weekday, WeeklyBalancePoint,
 };
 
 pub const CURRENT_SCHEMA_VERSION: i64 = 8;
@@ -251,7 +251,7 @@ impl Db {
         ) {
             Ok(_) => Ok(self.conn.last_insert_rowid()),
             Err(error) if is_unique_constraint(&error) => {
-                Err(AppError::duplicate("account", &normalized_name))
+                Err(AppError::duplicate(EntityKind::Account, &normalized_name))
             }
             Err(error) => Err(error.into()),
         }
@@ -319,10 +319,10 @@ impl Db {
                 account_id
             ],
         ) {
-            Ok(0) => Err(AppError::invalid_ref("account", reference.trim())),
+            Ok(0) => Err(AppError::invalid_ref(EntityKind::Account, reference.trim())),
             Ok(_) => Ok(account_id),
             Err(error) if is_unique_constraint(&error) => {
-                Err(AppError::duplicate("account", &next_name))
+                Err(AppError::duplicate(EntityKind::Account, &next_name))
             }
             Err(error) => Err(error.into()),
         }
@@ -343,7 +343,7 @@ impl Db {
             params![account_id],
         )?;
         if changed == 0 {
-            return Err(AppError::invalid_ref("account", reference.trim()));
+            return Err(AppError::invalid_ref(EntityKind::Account, reference.trim()));
         }
         Ok(account_id)
     }
@@ -356,7 +356,7 @@ impl Db {
         ) {
             Ok(_) => Ok(self.conn.last_insert_rowid()),
             Err(error) if is_unique_constraint(&error) => {
-                Err(AppError::duplicate("category", &normalized_name))
+                Err(AppError::duplicate(EntityKind::Category, &normalized_name))
             }
             Err(error) => Err(error.into()),
         }
@@ -411,10 +411,13 @@ impl Db {
              WHERE id = ?3",
             params![next_name, next_kind.as_db_str(), category_id],
         ) {
-            Ok(0) => Err(AppError::invalid_ref("category", reference.trim())),
+            Ok(0) => Err(AppError::invalid_ref(
+                EntityKind::Category,
+                reference.trim(),
+            )),
             Ok(_) => Ok(category_id),
             Err(error) if is_unique_constraint(&error) => {
-                Err(AppError::duplicate("category", &next_name))
+                Err(AppError::duplicate(EntityKind::Category, &next_name))
             }
             Err(error) => Err(error.into()),
         }
@@ -430,7 +433,10 @@ impl Db {
             params![category_id],
         )?;
         if changed == 0 {
-            return Err(AppError::invalid_ref("category", reference.trim()));
+            return Err(AppError::invalid_ref(
+                EntityKind::Category,
+                reference.trim(),
+            ));
         }
         Ok(category_id)
     }
@@ -2113,7 +2119,7 @@ impl Db {
         ) {
             Ok(_) => Ok(self.conn.last_insert_rowid()),
             Err(error) if is_unique_constraint(&error) => {
-                Err(AppError::duplicate("scenario", name))
+                Err(AppError::duplicate(EntityKind::Scenario, name))
             }
             Err(error) => Err(error.into()),
         }
@@ -2756,7 +2762,7 @@ impl Db {
                 |row| row.get(0),
             )
             .optional()?;
-        scenario_id.ok_or_else(|| AppError::invalid_ref("scenario", trimmed))
+        scenario_id.ok_or_else(|| AppError::invalid_ref(EntityKind::Scenario, trimmed))
     }
 
     fn resolve_planning_goal_input(
@@ -2862,7 +2868,7 @@ impl Db {
         ) {
             Ok(_) => Ok(self.conn.last_insert_rowid()),
             Err(error) if is_unique_constraint(&error) => {
-                Err(AppError::duplicate("goal", &goal.name))
+                Err(AppError::duplicate(EntityKind::Goal, &goal.name))
             }
             Err(error) => Err(error.into()),
         }
@@ -3416,170 +3422,115 @@ impl Db {
             .map_err(Into::into)
     }
 
-    pub fn import_csv_transactions(
-        &self,
-        plan: &CsvImportPlan,
-    ) -> Result<CsvImportResult, AppError> {
-        let account_id = self.resolve_account_ref(&plan.account)?;
+    pub fn import_transactions(&self, plan: &ImportPlan) -> Result<ImportResult, AppError> {
+        const DEFAULT_INCOME_CATEGORY: &str = "Uncategorized Income";
+        const DEFAULT_EXPENSE_CATEGORY: &str = "Uncategorized Expense";
+
+        let account_id = self.resolve_account_ref(plan.account())?;
         let account_name = self.account_name(account_id)?;
-        let mut reader = csv::ReaderBuilder::new()
-            .delimiter(plan.delimiter)
-            .from_path(&plan.path)?;
-        let headers = reader.headers()?.clone();
-        let date_index = find_csv_column(&headers, &plan.date_column)?;
-        let amount_index = find_csv_column(&headers, &plan.amount_column)?;
-        let description_index = find_csv_column(&headers, &plan.description_column)?;
-        let category_index = find_optional_csv_column(&headers, plan.category_column.as_deref())?;
-        let payee_index = find_optional_csv_column(&headers, plan.payee_column.as_deref())?;
-        let note_index = find_optional_csv_column(&headers, plan.note_column.as_deref())?;
-        let type_index = find_optional_csv_column(&headers, plan.type_column.as_deref())?;
+        let rows = load_import_rows(plan, &self.currency_code()?)?;
 
-        let mut preview = Vec::new();
-        let mut imported_count = 0_usize;
-        let mut duplicate_count = 0_usize;
+        // Wrap the entire import in a transaction so row-level failures leave
+        // the database untouched. For dry-run imports we always roll back, which
+        // also discards any category auto-creation side effects from
+        // ensure_import_category.
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
-        for (record_index, record) in reader.records().enumerate() {
-            let record = record?;
-            let line_number = record_index + 2;
-            let txn_date = parse_import_date(
-                required_csv_value(&record, date_index, line_number, &plan.date_column)?,
-                &plan.date_format,
-            )?;
-            let signed_amount = crate::amount::parse_signed_amount_to_cents(required_csv_value(
-                &record,
-                amount_index,
-                line_number,
-                &plan.amount_column,
-            )?)?;
-            let kind = if let Some(index) = type_index {
-                let raw_kind = optional_csv_value(&record, index).unwrap_or("").trim();
-                if raw_kind.is_empty() {
-                    plan.default_kind.unwrap_or({
-                        if signed_amount < 0 {
-                            TransactionKind::Expense
-                        } else {
-                            TransactionKind::Income
-                        }
-                    })
-                } else {
-                    parse_import_kind(raw_kind)?
+        let outcome = (|| -> Result<ImportResult, AppError> {
+            let mut preview = Vec::with_capacity(rows.len());
+            let mut imported_count = 0_usize;
+            let mut duplicate_count = 0_usize;
+
+            for row in rows {
+                if row.kind == TransactionKind::Transfer {
+                    return Err(AppError::Validation(
+                        "import plans do not support transfer rows in this release".to_string(),
+                    ));
                 }
-            } else {
-                plan.default_kind.unwrap_or({
-                    if signed_amount < 0 {
-                        TransactionKind::Expense
-                    } else {
-                        TransactionKind::Income
+
+                let category_id = match expected_category_kind(row.kind) {
+                    Some(expected_kind) => {
+                        let category_ref = row
+                            .category_ref
+                            .clone()
+                            .or_else(|| {
+                                plan.default_category_for_kind(row.kind)
+                                    .map(|value| value.to_string())
+                            })
+                            .unwrap_or_else(|| match expected_kind {
+                                CategoryKind::Income => DEFAULT_INCOME_CATEGORY.to_string(),
+                                CategoryKind::Expense => DEFAULT_EXPENSE_CATEGORY.to_string(),
+                            });
+                        Some(self.ensure_import_category(&category_ref, &expected_kind)?)
                     }
-                })
-            };
-            if kind == TransactionKind::Transfer {
-                return Err(AppError::Validation(format!(
-                    "CSV import does not support transfer rows (line {line_number})"
-                )));
-            }
-
-            let amount_cents = signed_amount.abs();
-            if amount_cents == 0 {
-                return Err(AppError::Validation(format!(
-                    "amount must be non-zero on CSV line {line_number}"
-                )));
-            }
-
-            let description = required_csv_value(
-                &record,
-                description_index,
-                line_number,
-                &plan.description_column,
-            )?
-            .trim()
-            .to_string();
-            let payee = payee_index
-                .and_then(|index| optional_csv_value(&record, index))
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .or_else(|| {
-                    if description.is_empty() {
-                        None
-                    } else {
-                        Some(description.clone())
-                    }
-                });
-            let note = note_index
-                .and_then(|index| optional_csv_value(&record, index))
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned);
-
-            let category_ref =
-                match category_index.and_then(|index| optional_csv_value(&record, index)) {
-                    Some(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
-                    _ => plan.category.clone(),
+                    None => None,
                 };
-            let expected_kind = expected_category_kind(kind)
-                .expect("transfer rows are already rejected during CSV import");
-            let category_id = match category_ref.as_deref() {
-                Some(reference) => {
-                    Some(self.resolve_category_ref(reference, Some(&expected_kind))?)
-                }
-                None => {
-                    return Err(AppError::Validation(format!(
-                        "CSV line {line_number} is missing a category"
-                    )))
-                }
-            };
-            let category_name = match category_id {
-                Some(id) => Some(self.category_name(id)?),
-                None => None,
-            };
+                let category_name = category_id.map(|id| self.category_name(id)).transpose()?;
 
-            let resolved = ResolvedTransaction {
-                txn_date: txn_date.clone(),
-                kind,
-                amount_cents,
-                account_id,
-                to_account_id: None,
-                category_id,
-                payee: payee.clone(),
-                note: note.clone(),
-                recurring_rule_id: None,
-            };
-            self.validate_resolved_transaction(&resolved)?;
+                let resolved = ResolvedTransaction {
+                    txn_date: row.txn_date.clone(),
+                    kind: row.kind,
+                    amount_cents: row.amount_cents,
+                    account_id,
+                    to_account_id: None,
+                    category_id,
+                    payee: row.payee.clone(),
+                    note: row.note.clone(),
+                    recurring_rule_id: None,
+                };
+                self.validate_resolved_transaction(&resolved)?;
 
-            let duplicate = if plan.allow_duplicates {
-                false
-            } else {
-                self.import_duplicate_exists(&resolved)?
-            };
-            if duplicate {
-                duplicate_count += 1;
-            } else {
-                imported_count += 1;
-                if !plan.dry_run {
-                    self.insert_transaction(&resolved)?;
+                let duplicate = if plan.allow_duplicates() {
+                    false
+                } else {
+                    self.import_duplicate_exists(&resolved)?
+                };
+                if duplicate {
+                    duplicate_count += 1;
+                } else {
+                    imported_count += 1;
+                    if !plan.dry_run() {
+                        self.insert_transaction(&resolved)?;
+                    }
                 }
+
+                preview.push(ImportedTransactionRow {
+                    line_number: row.line_number,
+                    txn_date: row.txn_date,
+                    kind: row.kind,
+                    amount_cents: row.amount_cents,
+                    account_name: account_name.clone(),
+                    category_name,
+                    payee: row.payee,
+                    note: row.note,
+                    duplicate,
+                });
             }
 
-            preview.push(ImportedTransactionRow {
-                line_number,
-                txn_date,
-                kind,
-                amount_cents,
-                account_name: account_name.clone(),
-                category_name,
-                payee,
-                note,
-                duplicate,
-            });
-        }
+            Ok(ImportResult {
+                dry_run: plan.dry_run(),
+                imported_count,
+                duplicate_count,
+                preview,
+            })
+        })();
 
-        Ok(CsvImportResult {
-            dry_run: plan.dry_run,
-            imported_count,
-            duplicate_count,
-            preview,
-        })
+        match outcome {
+            Ok(result) => {
+                if plan.dry_run() {
+                    self.conn.execute_batch("ROLLBACK")?;
+                } else {
+                    self.conn.execute_batch("COMMIT")?;
+                }
+                Ok(result)
+            }
+            Err(err) => {
+                // Best-effort rollback; surface the original error even if the
+                // rollback itself fails.
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
     }
 
     fn import_duplicate_exists(&self, transaction: &ResolvedTransaction) -> Result<bool, AppError> {
@@ -4257,7 +4208,7 @@ impl Db {
                 |row| row.get(0),
             )
             .optional()?;
-        id.ok_or_else(|| AppError::invalid_ref("account", trimmed))
+        id.ok_or_else(|| AppError::invalid_ref(EntityKind::Account, trimmed))
     }
 
     fn resolve_category_ref(
@@ -4279,11 +4230,49 @@ impl Db {
             )
             .optional()?;
         let (category_id, actual_kind) =
-            row.ok_or_else(|| AppError::invalid_ref("category", trimmed))?;
+            row.ok_or_else(|| AppError::invalid_ref(EntityKind::Category, trimmed))?;
         if let Some(expected) = expected_kind {
             validate_category_kind(expected, &actual_kind)?;
         }
         Ok(category_id)
+    }
+
+    fn ensure_import_category(
+        &self,
+        reference: &str,
+        expected_kind: &CategoryKind,
+    ) -> Result<i64, AppError> {
+        let trimmed = normalize_name("category", reference)?;
+        let existing = self
+            .conn
+            .query_row(
+                "SELECT id, kind, archived
+                 FROM categories
+                 WHERE name = ?1 COLLATE NOCASE",
+                params![trimmed],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)? == 1,
+                    ))
+                },
+            )
+            .optional()?;
+
+        match existing {
+            Some((category_id, actual_kind, archived)) => {
+                validate_category_kind(expected_kind, &actual_kind)?;
+                if archived {
+                    self.conn.execute(
+                        "UPDATE categories SET archived = 0 WHERE id = ?1",
+                        params![category_id],
+                    )?;
+                }
+                Ok(category_id)
+            }
+            None => self.add_category(&trimmed, expected_kind),
+        }
     }
 
     fn validate_resolved_transaction(
@@ -4632,7 +4621,7 @@ impl Db {
         ) {
             Ok(_) => Ok(self.conn.last_insert_rowid()),
             Err(error) if is_unique_constraint(&error) => {
-                Err(AppError::duplicate("recurring rule", &rule.name))
+                Err(AppError::duplicate(EntityKind::RecurringRule, &rule.name))
             }
             Err(error) => Err(error.into()),
         }
@@ -5100,63 +5089,6 @@ fn month_bounds(month: &str) -> Result<(String, String), AppError> {
     ))
 }
 
-fn find_csv_column(headers: &csv::StringRecord, name: &str) -> Result<usize, AppError> {
-    let target = name.trim().to_ascii_lowercase();
-    headers
-        .iter()
-        .position(|header| header.trim().to_ascii_lowercase() == target)
-        .ok_or_else(|| AppError::Validation(format!("CSV column `{name}` was not found")))
-}
-
-fn find_optional_csv_column(
-    headers: &csv::StringRecord,
-    name: Option<&str>,
-) -> Result<Option<usize>, AppError> {
-    match name {
-        Some(value) => find_csv_column(headers, value).map(Some),
-        None => Ok(None),
-    }
-}
-
-fn required_csv_value<'a>(
-    record: &'a csv::StringRecord,
-    index: usize,
-    line_number: usize,
-    column_name: &str,
-) -> Result<&'a str, AppError> {
-    let value = record.get(index).ok_or_else(|| {
-        AppError::Validation(format!(
-            "CSV line {line_number} is missing the `{column_name}` column"
-        ))
-    })?;
-    if value.trim().is_empty() {
-        return Err(AppError::Validation(format!(
-            "CSV line {line_number} has an empty `{column_name}` value"
-        )));
-    }
-    Ok(value)
-}
-
-fn optional_csv_value(record: &csv::StringRecord, index: usize) -> Option<&str> {
-    record.get(index).filter(|value| !value.trim().is_empty())
-}
-
-fn parse_import_date(value: &str, date_format: &str) -> Result<String, AppError> {
-    Ok(NaiveDate::parse_from_str(value.trim(), date_format)?
-        .format("%Y-%m-%d")
-        .to_string())
-}
-
-fn parse_import_kind(value: &str) -> Result<TransactionKind, AppError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "income" | "credit" | "deposit" | "inflow" => Ok(TransactionKind::Income),
-        "expense" | "debit" | "withdrawal" | "outflow" => Ok(TransactionKind::Expense),
-        "transfer" => Ok(TransactionKind::Transfer),
-        other => Err(AppError::Validation(format!(
-            "unsupported import transaction type `{other}`"
-        ))),
-    }
-}
 fn normalize_currency_code(currency: &str) -> Result<String, AppError> {
     let normalized = currency.trim().to_ascii_uppercase();
     let is_valid = normalized.len() == 3 && normalized.chars().all(|ch| ch.is_ascii_uppercase());

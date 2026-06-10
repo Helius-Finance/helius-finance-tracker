@@ -12,6 +12,13 @@ fn db_path(temp_dir: &TempDir) -> PathBuf {
     temp_dir.path().join("tracker.db")
 }
 
+fn fixture_path(relative: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(relative)
+}
+
 fn today() -> NaiveDate {
     Local::now().date_naive()
 }
@@ -166,6 +173,68 @@ fn transaction_map(temp_dir: &TempDir) -> Vec<Value> {
         .as_array()
         .unwrap()
         .clone()
+}
+
+fn seed_import_db(temp_dir: &TempDir) {
+    seed_import_db_currency(temp_dir, "EUR");
+}
+
+fn seed_import_db_currency(temp_dir: &TempDir, currency: &str) {
+    run_ok(temp_dir, &["init", "--currency", currency]);
+    run_ok(
+        temp_dir,
+        &["account", "add", "Checking", "--type", "checking"],
+    );
+}
+
+fn import_currency_for_preset(preset: &str) -> &'static str {
+    match preset {
+        "monzo" | "starling" | "barclays-uk" | "hsbc-uk" | "lloyds-uk" | "natwest-uk" => "GBP",
+        "chase-us" | "bank-of-america-us" | "wells-fargo-us" | "citi-us" => "USD",
+        "commbank-au" => "AUD",
+        _ => "EUR",
+    }
+}
+
+const COMMUNITY_PRESET_FIXTURES: &[(&str, &str)] = &[
+    ("n26", "import/n26.csv"),
+    ("monzo", "import/monzo.csv"),
+    ("starling", "import/starling.csv"),
+    ("wise", "import/wise.csv"),
+    ("dkb-de", "import/dkb-de.csv"),
+    ("commerzbank-de", "import/commerzbank-de.csv"),
+    ("chase-us", "import/chase-us.csv"),
+    ("bank-of-america-us", "import/bank-of-america-us.csv"),
+    ("wells-fargo-us", "import/wells-fargo-us.csv"),
+    ("citi-us", "import/citi-us.csv"),
+    ("barclays-uk", "import/barclays-uk.csv"),
+    ("hsbc-uk", "import/hsbc-uk.csv"),
+    ("lloyds-uk", "import/lloyds-uk.csv"),
+    ("natwest-uk", "import/natwest-uk.csv"),
+    ("ing-nl", "import/ing-nl.csv"),
+    ("deutsche-bank-de", "import/deutsche-bank-de.csv"),
+    ("bnp-paribas-fr", "import/bnp-paribas-fr.csv"),
+    ("santander-es", "import/santander-es.csv"),
+    ("intesa-sanpaolo-it", "import/intesa-sanpaolo-it.csv"),
+    ("commbank-au", "import/commbank-au.csv"),
+];
+
+fn import_with_preset(temp_dir: &TempDir, preset: &str, fixture: &str) -> Value {
+    serde_json::from_str(&run_ok(
+        temp_dir,
+        &[
+            "import",
+            "csv",
+            "--input",
+            fixture_path(fixture).to_str().unwrap(),
+            "--account",
+            "Checking",
+            "--preset",
+            preset,
+            "--json",
+        ],
+    ))
+    .unwrap()
 }
 
 #[test]
@@ -1789,5 +1858,406 @@ fn open_existing_repairs_missing_recurring_tables_before_running_commands() {
         .unwrap();
     assert_eq!(recurring_rules_exists, 1);
     assert_eq!(recurring_occurrences_exists, 1);
+}
+
+#[test]
+fn import_csv_lists_presets_with_stable_ids() {
+    let temp_dir = TempDir::new().unwrap();
+    run_ok(&temp_dir, &["init", "--currency", "EUR"]);
+
+    let presets: Value = serde_json::from_str(&run_ok(
+        &temp_dir,
+        &["import", "csv", "--list-presets", "--json"],
+    ))
+    .unwrap();
+    let ids = presets
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 25);
+    assert_eq!(ids[0], "alpha-bank-gr");
+    assert_eq!(ids[ids.len() - 1], "commbank-au");
+
+    let verification_levels = presets
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["verification"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(verification_levels.len(), 25);
+    assert_eq!(
+        verification_levels
+            .iter()
+            .filter(|level| **level == "first-party")
+            .count(),
+        5
+    );
+    assert_eq!(
+        verification_levels
+            .iter()
+            .filter(|level| **level == "community")
+            .count(),
+        20
+    );
+}
+
+#[test]
+fn import_csv_lists_presets_without_initialized_db() {
+    // --list-presets is a pure-data lookup and must work before `helius init`.
+    let temp_dir = TempDir::new().unwrap();
+    let raw = run_ok(&temp_dir, &["import", "csv", "--list-presets", "--json"]);
+    let presets: Value = serde_json::from_str(&raw).unwrap();
+    assert!(presets.as_array().is_some_and(|arr| !arr.is_empty()));
+}
+
+#[test]
+fn alpha_bank_preset_imports_fixture_rows() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+    let imported = import_with_preset(&temp_dir, "alpha-bank-gr", "import/alpha-bank-gr.csv");
+    assert_eq!(imported["imported_count"], 2);
+    let transactions = transaction_map(&temp_dir);
+    assert_eq!(transactions.len(), 2);
+    assert!(transactions
+        .iter()
+        .any(|tx| tx["category_name"] == "Uncategorized Expense"));
+    assert!(transactions
+        .iter()
+        .any(|tx| tx["category_name"] == "Uncategorized Income"));
+}
+
+#[test]
+fn eurobank_preset_imports_fixture_rows() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+    let imported = import_with_preset(&temp_dir, "eurobank-gr", "import/eurobank-gr.csv");
+    assert_eq!(imported["imported_count"], 2);
+    assert_eq!(transaction_map(&temp_dir).len(), 2);
+}
+
+#[test]
+fn nbg_preset_imports_fixture_rows() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+    let imported = import_with_preset(&temp_dir, "nbg-gr", "import/nbg-gr.csv");
+    assert_eq!(imported["imported_count"], 2);
+    assert_eq!(transaction_map(&temp_dir).len(), 2);
+}
+
+#[test]
+fn piraeus_preset_imports_fixture_rows() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+    let imported = import_with_preset(&temp_dir, "piraeus-gr", "import/piraeus-gr.csv");
+    assert_eq!(imported["imported_count"], 2);
+    assert_eq!(transaction_map(&temp_dir).len(), 2);
+}
+
+#[test]
+fn revolut_preset_imports_fixture_rows() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+    let imported = import_with_preset(&temp_dir, "revolut-csv", "import/revolut-csv.csv");
+    assert_eq!(imported["imported_count"], 2);
+    assert_eq!(transaction_map(&temp_dir).len(), 2);
+}
+
+#[test]
+fn community_presets_import_fixture_rows() {
+    for (preset, fixture) in COMMUNITY_PRESET_FIXTURES {
+        let temp_dir = TempDir::new().unwrap();
+        seed_import_db_currency(&temp_dir, import_currency_for_preset(preset));
+        let imported = import_with_preset(&temp_dir, preset, fixture);
+        assert_eq!(
+            imported["imported_count"], 2,
+            "preset `{preset}` should import two fixture rows"
+        );
+        assert_eq!(
+            transaction_map(&temp_dir).len(),
+            2,
+            "preset `{preset}` should persist two transactions"
+        );
+    }
+}
+
+#[test]
+fn import_csv_accepts_empty_file_with_headers_only() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+    let empty_csv = temp_dir.path().join("empty.csv");
+    fs::write(&empty_csv, "Date,Amount,Description,Payee,Reference\n").unwrap();
+    let raw = run_ok(
+        &temp_dir,
+        &[
+            "import",
+            "csv",
+            "--input",
+            empty_csv.to_str().unwrap(),
+            "--account",
+            "Checking",
+            "--json",
+        ],
+    );
+    let imported: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(imported["imported_count"], 0);
+    assert_eq!(imported["duplicate_count"], 0);
+    assert_eq!(transaction_map(&temp_dir).len(), 0);
+}
+
+#[test]
+fn import_camt053_accepts_empty_statement() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+    let raw = run_ok(
+        &temp_dir,
+        &[
+            "import",
+            "camt053",
+            "--input",
+            fixture_path("import/camt053-empty.xml").to_str().unwrap(),
+            "--account",
+            "Checking",
+            "--json",
+        ],
+    );
+    let imported: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(imported["imported_count"], 0);
+    assert_eq!(imported["duplicate_count"], 0);
+    assert_eq!(transaction_map(&temp_dir).len(), 0);
+}
+
+#[test]
+fn import_csv_reports_missing_file_path_clearly() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+    let missing = temp_dir.path().join("does-not-exist.csv");
+    Command::cargo_bin("helius")
+        .unwrap()
+        .arg("--db")
+        .arg(db_path(&temp_dir))
+        .args([
+            "import",
+            "csv",
+            "--input",
+            missing.to_str().unwrap(),
+            "--account",
+            "Checking",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does-not-exist.csv"));
+}
+
+#[test]
+fn import_camt053_reports_missing_file_path_clearly() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+    let missing = temp_dir.path().join("missing.xml");
+    Command::cargo_bin("helius")
+        .unwrap()
+        .arg("--db")
+        .arg(db_path(&temp_dir))
+        .args([
+            "import",
+            "camt053",
+            "--input",
+            missing.to_str().unwrap(),
+            "--account",
+            "Checking",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("missing.xml"));
+}
+
+#[test]
+fn uncategorized_fallback_categories_are_created_and_restored() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+
+    let first_file = temp_dir.path().join("manual-import.csv");
+    fs::write(
+        &first_file,
+        "Date,Amount,Description\n2026-03-01,-12.00,Coffee\n2026-03-02,1200.00,Salary\n",
+    )
+    .unwrap();
+    let _imported = run_ok(
+        &temp_dir,
+        &[
+            "import",
+            "csv",
+            "--input",
+            first_file.to_str().unwrap(),
+            "--account",
+            "Checking",
+            "--json",
+        ],
+    );
+
+    let categories: Value =
+        serde_json::from_str(&run_ok(&temp_dir, &["category", "list", "--json"])).unwrap();
+    assert!(categories
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["name"] == "Uncategorized Expense"));
+    assert!(categories
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["name"] == "Uncategorized Income"));
+
+    run_ok(&temp_dir, &["category", "delete", "Uncategorized Expense"]);
+
+    let second_file = temp_dir.path().join("manual-import-2.csv");
+    fs::write(
+        &second_file,
+        "Date,Amount,Description\n2026-03-03,-8.50,Snack\n",
+    )
+    .unwrap();
+    let imported: Value = serde_json::from_str(&run_ok(
+        &temp_dir,
+        &[
+            "import",
+            "csv",
+            "--input",
+            second_file.to_str().unwrap(),
+            "--account",
+            "Checking",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(imported["imported_count"], 1);
+
+    let categories: Value =
+        serde_json::from_str(&run_ok(&temp_dir, &["category", "list", "--json"])).unwrap();
+    assert!(categories
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["name"] == "Uncategorized Expense"));
+}
+
+#[test]
+fn camt053_import_parses_booked_credit_entry() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+
+    let imported: Value = serde_json::from_str(&run_ok(
+        &temp_dir,
+        &[
+            "import",
+            "camt053",
+            "--input",
+            fixture_path("import/camt053-booked-credit.xml")
+                .to_str()
+                .unwrap(),
+            "--account",
+            "Checking",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(imported["imported_count"], 1);
+
+    let transactions = transaction_map(&temp_dir);
+    assert_eq!(transactions[0]["kind"], "income");
+    assert_eq!(transactions[0]["payee"], "Employer Ltd");
+}
+
+#[test]
+fn camt053_import_parses_booked_debit_entry() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+
+    let imported: Value = serde_json::from_str(&run_ok(
+        &temp_dir,
+        &[
+            "import",
+            "camt053",
+            "--input",
+            fixture_path("import/camt053-booked-debit.xml")
+                .to_str()
+                .unwrap(),
+            "--account",
+            "Checking",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(imported["imported_count"], 1);
+
+    let transactions = transaction_map(&temp_dir);
+    assert_eq!(transactions[0]["kind"], "expense");
+    assert_eq!(transactions[0]["payee"], "Supermarket");
+}
+
+#[test]
+fn camt053_import_flattens_multiple_transaction_details() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+
+    let imported: Value = serde_json::from_str(&run_ok(
+        &temp_dir,
+        &[
+            "import",
+            "camt053",
+            "--input",
+            fixture_path("import/camt053-txdtls.xml").to_str().unwrap(),
+            "--account",
+            "Checking",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(imported["imported_count"], 2);
+    assert_eq!(transaction_map(&temp_dir).len(), 2);
+}
+
+#[test]
+fn camt053_import_uses_value_date_when_booking_date_is_missing() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+
+    let _imported = run_ok(
+        &temp_dir,
+        &[
+            "import",
+            "camt053",
+            "--input",
+            fixture_path("import/camt053-value-date.xml")
+                .to_str()
+                .unwrap(),
+            "--account",
+            "Checking",
+            "--json",
+        ],
+    );
+    let transactions = transaction_map(&temp_dir);
+    assert_eq!(transactions[0]["txn_date"], "2026-03-15");
+}
+
+#[test]
+fn camt053_import_rejects_currency_mismatch() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+
+    let error = run_err(
+        &temp_dir,
+        &[
+            "import",
+            "camt053",
+            "--input",
+            fixture_path("import/camt053-currency-mismatch.xml")
+                .to_str()
+                .unwrap(),
+            "--account",
+            "Checking",
+        ],
+    );
+    assert!(error.contains("currency mismatch"));
 }
 // SPDX-License-Identifier: AGPL-3.0-only

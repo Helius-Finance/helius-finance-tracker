@@ -98,6 +98,11 @@ fn print_help(stdout: &mut dyn Write) -> Result<(), AppError> {
     writeln!(stdout, "  reconcile list")?;
     writeln!(stdout, "  recurring list")?;
     writeln!(stdout, "  budget status 2026-03")?;
+    writeln!(stdout, "  import csv --list-presets")?;
+    writeln!(
+        stdout,
+        "  import csv --input bank.csv --account Checking --preset revolut-csv --dry-run"
+    )?;
     Ok(())
 }
 

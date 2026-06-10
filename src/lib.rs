@@ -1,12 +1,19 @@
 mod amount;
 mod cli;
 mod db;
-mod error;
+pub mod error;
+mod importer;
 mod model;
 mod output;
+pub mod services;
 mod shell;
 mod theme;
 mod ui;
+
+// Re-exports for integration tests and the future GUI crate. Everything here
+// is part of the stable API surface between frontends and the core.
+pub use crate::db::Db;
+pub use crate::model::{Account, AccountKind, TransactionFilters};
 
 use std::ffi::OsString;
 use std::io::{BufRead, IsTerminal, Write};
@@ -21,8 +28,8 @@ use crate::cli::{
     BudgetDeleteArgs, BudgetListArgs, BudgetSetArgs, BudgetStatusArgs, CategoryAddArgs,
     CategoryCommand, CategoryDeleteArgs, CategoryEditArgs, Cli, Command, ExportCommand,
     ExportCsvArgs, ForecastBillsArgs, ForecastCommand, ForecastShowArgs, GoalAddArgs, GoalCommand,
-    GoalDeleteArgs, GoalEditArgs, GoalListArgs, ImportCommand, ImportCsvArgs, InitArgs,
-    PlanCommand, PlanItemAddArgs, PlanItemCommand, PlanItemEditArgs, PlanItemIdArgs,
+    GoalDeleteArgs, GoalEditArgs, GoalListArgs, ImportCamt053Args, ImportCommand, ImportCsvArgs,
+    InitArgs, PlanCommand, PlanItemAddArgs, PlanItemCommand, PlanItemEditArgs, PlanItemIdArgs,
     PlanItemListArgs, ReconcileCommand, ReconcileDeleteArgs, ReconcileListArgs, ReconcileStartArgs,
     RecurringAddArgs, RecurringCommand, RecurringEditArgs, RecurringIdArgs, RecurringListArgs,
     RecurringRunArgs, ScenarioAddArgs, ScenarioCommand, ScenarioDeleteArgs, ScenarioEditArgs,
@@ -30,12 +37,16 @@ use crate::cli::{
     TransactionCommand, TransactionDeleteArgs, TransactionEditArgs, TransactionListArgs,
     TransactionRestoreArgs,
 };
-use crate::db::{db_requires_init, resolve_db_path, Db};
-pub use crate::error::AppError;
+use crate::db::{db_requires_init, resolve_db_path};
+pub use crate::error::{AppError, EntityKind};
+use crate::importer::import_preset_summaries;
 use crate::model::{
-    CsvImportPlan, ExportKind, NewPlanningGoal, NewPlanningItem, NewPlanningScenario,
-    NewRecurringRule, NewTransaction, TransactionFilters, UpdatePlanningGoal, UpdatePlanningItem,
-    UpdatePlanningScenario, UpdateRecurringRule, UpdateTransaction,
+    ExportKind, NewPlanningGoal, NewPlanningItem, NewPlanningScenario, NewRecurringRule,
+    NewTransaction, UpdatePlanningGoal, UpdatePlanningItem, UpdatePlanningScenario,
+    UpdateRecurringRule, UpdateTransaction,
+};
+use crate::services::import::{
+    Camt053ImportRequest, CsvImportRequest, ImportRequest, ImportService,
 };
 
 const DEFAULT_ONBOARDING_CURRENCY: &str = "USD";
@@ -171,6 +182,17 @@ fn run_command(db_path: &Path, command: Command, stdout: &mut dyn Write) -> Resu
             with_existing_db(db_path, |db| handle_export(db, command, stdout))
         }
         Command::Import { command } => {
+            // --list-presets is a pure-data lookup, so let new users inspect the
+            // preset catalog before running `helius init`.
+            if let ImportCommand::Csv(ref args) = command {
+                if args.list_presets {
+                    return output::write_import_presets(
+                        stdout,
+                        &import_preset_summaries(),
+                        args.json,
+                    );
+                }
+            }
             with_existing_db(db_path, |db| handle_import(db, command, stdout))
         }
         Command::Budget { command } => {
@@ -213,6 +235,7 @@ fn handle_init(db_path: &Path, args: InitArgs, stdout: &mut dyn Write) -> Result
 }
 
 fn handle_account(db: Db, command: AccountCommand, stdout: &mut dyn Write) -> Result<(), AppError> {
+    let service = crate::services::accounts::AccountService::new(&db);
     match command {
         AccountCommand::Add(AccountAddArgs {
             name,
@@ -228,7 +251,12 @@ fn handle_account(db: Db, command: AccountCommand, stdout: &mut dyn Write) -> Re
                 Some(value) => normalize_date(&value)?,
                 None => today_iso(),
             };
-            let account_id = db.add_account(&name, &kind, opening_balance_cents, &opened_on)?;
+            let account_id = service.add(crate::services::accounts::AddAccountRequest {
+                name: name.clone(),
+                kind,
+                opening_balance_cents,
+                opened_on,
+            })?;
             writeln!(
                 stdout,
                 "{}",
@@ -248,22 +276,13 @@ fn handle_account(db: Db, command: AccountCommand, stdout: &mut dyn Write) -> Re
             let opening_balance_cents = opening_balance
                 .map(|value| parse_balance_to_cents(&value))
                 .transpose()?;
-            if name.is_none()
-                && kind.is_none()
-                && opening_balance_cents.is_none()
-                && opened_on.is_none()
-            {
-                return Err(AppError::Validation(
-                    "account edit requires at least one field change".to_string(),
-                ));
-            }
-            let account_id = db.edit_account(
-                &account,
-                name.as_deref(),
-                kind.as_ref(),
+            let account_id = service.edit(crate::services::accounts::EditAccountRequest {
+                reference: account,
+                name,
+                kind,
                 opening_balance_cents,
-                opened_on.as_deref(),
-            )?;
+                opened_on,
+            })?;
             writeln!(
                 stdout,
                 "{}",
@@ -272,7 +291,8 @@ fn handle_account(db: Db, command: AccountCommand, stdout: &mut dyn Write) -> Re
             Ok(())
         }
         AccountCommand::Delete(AccountDeleteArgs { account }) => {
-            let account_id = db.delete_account(&account)?;
+            let account_id = service
+                .delete(crate::services::accounts::DeleteAccountRequest { reference: account })?;
             writeln!(
                 stdout,
                 "{}",
@@ -281,7 +301,7 @@ fn handle_account(db: Db, command: AccountCommand, stdout: &mut dyn Write) -> Re
             Ok(())
         }
         AccountCommand::List(args) => {
-            let accounts = db.list_accounts()?;
+            let accounts = service.list(crate::services::accounts::ListAccountsRequest)?;
             output::write_accounts(stdout, &accounts, args.json)
         }
     }
@@ -292,9 +312,17 @@ fn handle_category(
     command: CategoryCommand,
     stdout: &mut dyn Write,
 ) -> Result<(), AppError> {
+    use crate::services::categories::{
+        AddCategoryRequest, CategoryService, DeleteCategoryRequest, EditCategoryRequest,
+        ListCategoriesRequest,
+    };
+    let service = CategoryService::new(&db);
     match command {
         CategoryCommand::Add(CategoryAddArgs { name, kind }) => {
-            let category_id = db.add_category(&name, &kind)?;
+            let category_id = service.add(AddCategoryRequest {
+                name: name.clone(),
+                kind,
+            })?;
             writeln!(
                 stdout,
                 "{}",
@@ -307,22 +335,11 @@ fn handle_category(
             name,
             kind,
         }) => {
-            if name
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_none()
-                && kind.is_none()
-            {
-                return Err(AppError::Validation(
-                    "category edit requires --name, --kind, or both".to_string(),
-                ));
-            }
-            let category_id = db.edit_category(
-                &category,
-                normalize_optional_string(name).as_deref(),
-                kind.as_ref(),
-            )?;
+            let category_id = service.edit(EditCategoryRequest {
+                reference: category,
+                name: normalize_optional_string(name),
+                kind,
+            })?;
             writeln!(
                 stdout,
                 "{}",
@@ -331,7 +348,9 @@ fn handle_category(
             Ok(())
         }
         CategoryCommand::Delete(CategoryDeleteArgs { category }) => {
-            let category_id = db.delete_category(&category)?;
+            let category_id = service.delete(DeleteCategoryRequest {
+                reference: category,
+            })?;
             writeln!(
                 stdout,
                 "{}",
@@ -340,7 +359,7 @@ fn handle_category(
             Ok(())
         }
         CategoryCommand::List(args) => {
-            let categories = db.list_categories()?;
+            let categories = service.list(ListCategoriesRequest)?;
             output::write_categories(stdout, &categories, args.json)
         }
     }
@@ -351,6 +370,8 @@ fn handle_transaction(
     command: TransactionCommand,
     stdout: &mut dyn Write,
 ) -> Result<(), AppError> {
+    use crate::services::transactions::TransactionService;
+    let service = TransactionService::new(&db);
     match command {
         TransactionCommand::Add(TransactionAddArgs {
             kind,
@@ -373,7 +394,7 @@ fn handle_transaction(
                 note: normalize_optional_string(note),
                 recurring_rule_id: None,
             };
-            let transaction_id = db.add_transaction(&transaction)?;
+            let transaction_id = service.add(&transaction)?;
             writeln!(
                 stdout,
                 "{}",
@@ -414,7 +435,7 @@ fn handle_transaction(
                 clear_payee,
                 clear_note,
             };
-            db.edit_transaction(&patch)?;
+            service.edit(&patch)?;
             writeln!(
                 stdout,
                 "{}",
@@ -423,7 +444,7 @@ fn handle_transaction(
             Ok(())
         }
         TransactionCommand::Delete(TransactionDeleteArgs { id }) => {
-            db.delete_transaction(id)?;
+            service.delete(id)?;
             writeln!(
                 stdout,
                 "{}",
@@ -432,7 +453,7 @@ fn handle_transaction(
             Ok(())
         }
         TransactionCommand::Restore(TransactionRestoreArgs { id }) => {
-            db.restore_transaction(id)?;
+            service.restore(id)?;
             writeln!(
                 stdout,
                 "{}",
@@ -459,14 +480,15 @@ fn handle_transaction(
                 limit,
                 include_deleted,
             };
-            let transactions = db.list_transactions(&filters)?;
+            let transactions = service.list(&filters)?;
             output::write_transactions(stdout, &transactions, json)
         }
     }
 }
 
 fn handle_balance(db: Db, args: BalanceArgs, stdout: &mut dyn Write) -> Result<(), AppError> {
-    let balances = db.balances(
+    use crate::services::reporting::ReportingService;
+    let balances = ReportingService::new(&db).balances(
         args.account
             .as_deref()
             .map(str::trim)
@@ -476,6 +498,8 @@ fn handle_balance(db: Db, args: BalanceArgs, stdout: &mut dyn Write) -> Result<(
 }
 
 fn handle_summary(db: Db, command: SummaryCommand, stdout: &mut dyn Write) -> Result<(), AppError> {
+    use crate::services::reporting::ReportingService;
+    let service = ReportingService::new(&db);
     match command {
         SummaryCommand::Month(SummaryMonthArgs {
             month,
@@ -486,13 +510,10 @@ fn handle_summary(db: Db, command: SummaryCommand, stdout: &mut dyn Write) -> Re
                 Some(value) => month_range(&value)?,
                 None => current_month_range(),
             };
-            let summary = db.summary(
+            let summary = service.summary(
                 &from,
                 &to,
-                account
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty()),
+                account.as_deref().map(str::trim).filter(|v| !v.is_empty()),
             )?;
             output::write_summary(stdout, &summary, json)
         }
@@ -502,13 +523,10 @@ fn handle_summary(db: Db, command: SummaryCommand, stdout: &mut dyn Write) -> Re
             account,
             json,
         }) => {
-            let summary = db.summary(
+            let summary = service.summary(
                 &normalize_date(&from)?,
                 &normalize_date(&to)?,
-                account
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty()),
+                account.as_deref().map(str::trim).filter(|v| !v.is_empty()),
             )?;
             output::write_summary(stdout, &summary, json)
         }
@@ -516,6 +534,8 @@ fn handle_summary(db: Db, command: SummaryCommand, stdout: &mut dyn Write) -> Re
 }
 
 fn handle_export(db: Db, command: ExportCommand, stdout: &mut dyn Write) -> Result<(), AppError> {
+    use crate::services::reporting::ReportingService;
+    use crate::services::transactions::TransactionService;
     match command {
         ExportCommand::Csv(ExportCsvArgs {
             kind,
@@ -537,7 +557,7 @@ fn handle_export(db: Db, command: ExportCommand, stdout: &mut dyn Write) -> Resu
                     limit: None,
                     include_deleted: true,
                 };
-                let transactions = db.list_transactions(&filters)?;
+                let transactions = TransactionService::new(&db).list(&filters)?;
                 output::export_transactions_csv(&output, &transactions)?;
                 writeln!(
                     stdout,
@@ -562,7 +582,7 @@ fn handle_export(db: Db, command: ExportCommand, stdout: &mut dyn Write) -> Resu
                     ));
                 }
                 let (from, to) = resolve_export_range(month, from, to, true)?;
-                let summary = db.summary(
+                let summary = ReportingService::new(&db).summary(
                     &from.ok_or_else(|| {
                         AppError::Validation(
                             "summary export requires --month or both --from and --to".to_string(),
@@ -591,15 +611,22 @@ fn handle_export(db: Db, command: ExportCommand, stdout: &mut dyn Write) -> Resu
 }
 
 fn handle_import(db: Db, command: ImportCommand, stdout: &mut dyn Write) -> Result<(), AppError> {
+    let service = ImportService::new(&db);
     match command {
         ImportCommand::Csv(ImportCsvArgs {
             input,
             account,
+            preset,
+            list_presets,
             date_column,
             amount_column,
+            debit_column,
+            credit_column,
             description_column,
             category_column,
             category,
+            income_category,
+            expense_category,
             payee_column,
             note_column,
             type_column,
@@ -610,37 +637,74 @@ fn handle_import(db: Db, command: ImportCommand, stdout: &mut dyn Write) -> Resu
             allow_duplicates,
             json,
         }) => {
-            let delimiter_u8 = if delimiter.is_ascii() {
-                delimiter as u8
-            } else {
-                return Err(AppError::Validation(
-                    "CSV delimiter must be a single ASCII character".to_string(),
-                ));
+            if list_presets {
+                return output::write_import_presets(stdout, &import_preset_summaries(), json);
+            }
+
+            let delimiter_u8 = match delimiter {
+                Some(value) if value.is_ascii() => Some(value as u8),
+                Some(_) => {
+                    return Err(AppError::Validation(
+                        "CSV delimiter must be a single ASCII character".to_string(),
+                    ))
+                }
+                None => None,
             };
-            let plan = CsvImportPlan {
-                path: input,
-                account,
+            let request = CsvImportRequest {
+                path: input.ok_or_else(|| {
+                    AppError::Validation("import csv requires --input".to_string())
+                })?,
+                account: account.ok_or_else(|| {
+                    AppError::Validation("import csv requires --account".to_string())
+                })?,
+                preset_id: normalize_optional_string(preset),
                 date_column,
                 amount_column,
+                debit_column,
+                credit_column,
                 description_column,
                 category_column,
                 category,
+                income_category,
+                expense_category,
                 payee_column,
                 note_column,
                 type_column,
-                default_kind: default_type,
+                default_kind: default_type.map(Into::into),
                 date_format,
                 delimiter: delimiter_u8,
                 dry_run,
                 allow_duplicates,
             };
-            let result = db.import_csv_transactions(&plan)?;
-            output::write_csv_import_result(stdout, &result, json)
+            let result = service.execute(ImportRequest::Csv(Box::new(request)))?;
+            output::write_import_result(stdout, &result, json)
+        }
+        ImportCommand::Camt053(ImportCamt053Args {
+            input,
+            account,
+            income_category,
+            expense_category,
+            dry_run,
+            allow_duplicates,
+            json,
+        }) => {
+            let request = Camt053ImportRequest {
+                path: input,
+                account,
+                income_category,
+                expense_category,
+                dry_run,
+                allow_duplicates,
+            };
+            let result = service.execute(ImportRequest::Camt053(request))?;
+            output::write_import_result(stdout, &result, json)
         }
     }
 }
 
 fn handle_budget(db: Db, command: BudgetCommand, stdout: &mut dyn Write) -> Result<(), AppError> {
+    use crate::services::budgets::BudgetService;
+    let service = BudgetService::new(&db);
     match command {
         BudgetCommand::Set(BudgetSetArgs {
             category,
@@ -651,7 +715,7 @@ fn handle_budget(db: Db, command: BudgetCommand, stdout: &mut dyn Write) -> Resu
         }) => {
             let month = normalize_month(&month)?;
             let amount_cents = parse_amount_to_cents(&amount)?;
-            let budget_id = db.set_budget(
+            let budget_id = service.set(
                 &month,
                 &category,
                 amount_cents,
@@ -674,11 +738,9 @@ fn handle_budget(db: Db, command: BudgetCommand, stdout: &mut dyn Write) -> Resu
         }) => {
             let month = normalize_month(&month)?;
             let scenario = normalize_optional_string(scenario);
-            db.delete_budget(&month, &category, scenario.as_deref())?;
+            service.delete(&month, &category, scenario.as_deref())?;
             let message = match scenario {
-                Some(name) => {
-                    format!("Reset scenario budget for {category} in {month} ({name}).")
-                }
+                Some(name) => format!("Reset scenario budget for {category} in {month} ({name})."),
                 None => format!("Deleted budget for {category} in {month}."),
             };
             writeln!(stdout, "{}", output::warning_text(&message))?;
@@ -693,7 +755,7 @@ fn handle_budget(db: Db, command: BudgetCommand, stdout: &mut dyn Write) -> Resu
                 Some(value) => Some(normalize_month(&value)?),
                 None => None,
             };
-            let budgets = db.list_budgets(
+            let budgets = service.list(
                 month.as_deref(),
                 normalize_optional_string(scenario).as_deref(),
             )?;
@@ -708,7 +770,7 @@ fn handle_budget(db: Db, command: BudgetCommand, stdout: &mut dyn Write) -> Resu
                 Some(value) => normalize_month(&value)?,
                 None => Local::now().date_naive().format("%Y-%m").to_string(),
             };
-            let rows = db.budget_status(&month, normalize_optional_string(scenario).as_deref())?;
+            let rows = service.status(&month, normalize_optional_string(scenario).as_deref())?;
             output::write_budget_status(stdout, &rows, json)
         }
     }
@@ -719,6 +781,8 @@ fn handle_forecast(
     command: ForecastCommand,
     stdout: &mut dyn Write,
 ) -> Result<(), AppError> {
+    use crate::services::reporting::ReportingService;
+    let service = ReportingService::new(&db);
     match command {
         ForecastCommand::Show(ForecastShowArgs {
             scenario,
@@ -726,7 +790,7 @@ fn handle_forecast(
             days,
             json,
         }) => {
-            let snapshot = db.forecast(
+            let snapshot = service.forecast(
                 normalize_optional_string(scenario).as_deref(),
                 normalize_optional_string(account).as_deref(),
                 days,
@@ -739,7 +803,7 @@ fn handle_forecast(
             days,
             json,
         }) => {
-            let snapshot = db.forecast(
+            let snapshot = service.forecast(
                 normalize_optional_string(scenario).as_deref(),
                 normalize_optional_string(account).as_deref(),
                 days,
@@ -750,6 +814,8 @@ fn handle_forecast(
 }
 
 fn handle_plan(db: Db, command: PlanCommand, stdout: &mut dyn Write) -> Result<(), AppError> {
+    use crate::services::planning::PlanningService;
+    let service = PlanningService::new(&db);
     match command {
         PlanCommand::Item { command } => match command {
             PlanItemCommand::Add(PlanItemAddArgs {
@@ -776,7 +842,7 @@ fn handle_plan(db: Db, command: PlanCommand, stdout: &mut dyn Write) -> Result<(
                     payee: normalize_optional_string(payee),
                     note: normalize_optional_string(note),
                 };
-                let item_id = db.add_planning_item(&item)?;
+                let item_id = service.add_item(&item)?;
                 writeln!(
                     stdout,
                     "{}",
@@ -870,7 +936,7 @@ fn handle_plan(db: Db, command: PlanCommand, stdout: &mut dyn Write) -> Result<(
                     clear_payee,
                     clear_note,
                 };
-                db.edit_planning_item(&patch)?;
+                service.edit_item(&patch)?;
                 writeln!(
                     stdout,
                     "{}",
@@ -884,7 +950,7 @@ fn handle_plan(db: Db, command: PlanCommand, stdout: &mut dyn Write) -> Result<(
                 to,
                 json,
             }) => {
-                let items = db.list_planning_items(
+                let items = service.list_items(
                     normalize_optional_string(scenario).as_deref(),
                     normalize_optional_date(from)?.as_deref(),
                     normalize_optional_date(to)?.as_deref(),
@@ -892,7 +958,7 @@ fn handle_plan(db: Db, command: PlanCommand, stdout: &mut dyn Write) -> Result<(
                 output::write_planning_items(stdout, &items, json)
             }
             PlanItemCommand::Delete(PlanItemIdArgs { id }) => {
-                db.delete_planning_item(id)?;
+                service.delete_item(id)?;
                 writeln!(
                     stdout,
                     "{}",
@@ -901,7 +967,7 @@ fn handle_plan(db: Db, command: PlanCommand, stdout: &mut dyn Write) -> Result<(
                 Ok(())
             }
             PlanItemCommand::Post(PlanItemIdArgs { id }) => {
-                let transaction_id = db.post_planning_item(id)?;
+                let transaction_id = service.post_item(id)?;
                 writeln!(
                     stdout,
                     "{}",
@@ -920,9 +986,11 @@ fn handle_scenario(
     command: ScenarioCommand,
     stdout: &mut dyn Write,
 ) -> Result<(), AppError> {
+    use crate::services::planning::PlanningService;
+    let service = PlanningService::new(&db);
     match command {
         ScenarioCommand::Add(ScenarioAddArgs { name, note }) => {
-            let scenario_id = db.add_planning_scenario(&NewPlanningScenario {
+            let scenario_id = service.add_scenario(&NewPlanningScenario {
                 name,
                 note: normalize_optional_string(note),
             })?;
@@ -934,7 +1002,7 @@ fn handle_scenario(
             Ok(())
         }
         ScenarioCommand::List(ScenarioListArgs { json }) => {
-            let scenarios = db.list_planning_scenarios()?;
+            let scenarios = service.list_scenarios()?;
             output::write_planning_scenarios(stdout, &scenarios, json)
         }
         ScenarioCommand::Edit(ScenarioEditArgs {
@@ -959,7 +1027,7 @@ fn handle_scenario(
                     "scenario edit requires --name, --note, or --clear-note".to_string(),
                 ));
             }
-            db.edit_planning_scenario(&UpdatePlanningScenario {
+            service.edit_scenario(&UpdatePlanningScenario {
                 id,
                 name: normalize_optional_string(name),
                 note: normalize_optional_string(note),
@@ -973,7 +1041,7 @@ fn handle_scenario(
             Ok(())
         }
         ScenarioCommand::Delete(ScenarioDeleteArgs { id }) => {
-            db.delete_planning_scenario(id)?;
+            service.delete_scenario(id)?;
             writeln!(
                 stdout,
                 "{}",
@@ -985,6 +1053,8 @@ fn handle_scenario(
 }
 
 fn handle_goal(db: Db, command: GoalCommand, stdout: &mut dyn Write) -> Result<(), AppError> {
+    use crate::services::planning::PlanningService;
+    let service = PlanningService::new(&db);
     match command {
         GoalCommand::Add(GoalAddArgs {
             name,
@@ -994,7 +1064,7 @@ fn handle_goal(db: Db, command: GoalCommand, stdout: &mut dyn Write) -> Result<(
             minimum_balance,
             due_on,
         }) => {
-            let goal_id = db.add_planning_goal(&NewPlanningGoal {
+            let goal_id = service.add_goal(&NewPlanningGoal {
                 name,
                 kind,
                 account,
@@ -1014,7 +1084,7 @@ fn handle_goal(db: Db, command: GoalCommand, stdout: &mut dyn Write) -> Result<(
             Ok(())
         }
         GoalCommand::List(GoalListArgs { json }) => {
-            let goals = db.list_planning_goals()?;
+            let goals = service.list_goals()?;
             output::write_planning_goals(stdout, &goals, json)
         }
         GoalCommand::Edit(GoalEditArgs {
@@ -1051,7 +1121,7 @@ fn handle_goal(db: Db, command: GoalCommand, stdout: &mut dyn Write) -> Result<(
                     "goal edit requires at least one field change".to_string(),
                 ));
             }
-            db.edit_planning_goal(&UpdatePlanningGoal {
+            service.edit_goal(&UpdatePlanningGoal {
                 id,
                 name: normalize_optional_string(name),
                 kind,
@@ -1075,7 +1145,7 @@ fn handle_goal(db: Db, command: GoalCommand, stdout: &mut dyn Write) -> Result<(
             Ok(())
         }
         GoalCommand::Delete(GoalDeleteArgs { id }) => {
-            db.delete_planning_goal(id)?;
+            service.delete_goal(id)?;
             writeln!(
                 stdout,
                 "{}",
@@ -1091,6 +1161,8 @@ fn handle_reconcile(
     command: ReconcileCommand,
     stdout: &mut dyn Write,
 ) -> Result<(), AppError> {
+    use crate::services::reconciliation::ReconciliationService;
+    let service = ReconciliationService::new(&db);
     match command {
         ReconcileCommand::Start(ReconcileStartArgs {
             account,
@@ -1104,7 +1176,7 @@ fn handle_reconcile(
                         .to_string(),
                 ));
             }
-            let reconciliation_id = db.start_reconciliation(
+            let reconciliation_id = service.start(
                 &account,
                 &normalize_date(&statement_ending_on)?,
                 parse_amount_to_cents(&statement_balance)?,
@@ -1118,7 +1190,7 @@ fn handle_reconcile(
             Ok(())
         }
         ReconcileCommand::List(ReconcileListArgs { account, json }) => {
-            let reconciliations = db.list_reconciliations(
+            let reconciliations = service.list(
                 account
                     .as_deref()
                     .map(str::trim)
@@ -1127,7 +1199,7 @@ fn handle_reconcile(
             output::write_reconciliations(stdout, &reconciliations, json)
         }
         ReconcileCommand::Delete(ReconcileDeleteArgs { id }) => {
-            db.delete_reconciliation(id)?;
+            service.delete(id)?;
             writeln!(
                 stdout,
                 "{}",
@@ -1143,6 +1215,8 @@ fn handle_recurring(
     command: RecurringCommand,
     stdout: &mut dyn Write,
 ) -> Result<(), AppError> {
+    use crate::services::recurring::RecurringService;
+    let service = RecurringService::new(&db);
     match command {
         RecurringCommand::Add(RecurringAddArgs {
             name,
@@ -1178,7 +1252,7 @@ fn handle_recurring(
                 next_due_on: normalize_optional_date(next_due_on)?,
                 end_on: normalize_optional_date(end_on)?,
             };
-            let rule_id = db.add_recurring_rule(&rule)?;
+            let rule_id = service.add(&rule)?;
             writeln!(
                 stdout,
                 "{}",
@@ -1241,7 +1315,7 @@ fn handle_recurring(
                 clear_next_due_on,
                 clear_end_on,
             };
-            db.edit_recurring_rule(&patch)?;
+            service.edit(&patch)?;
             writeln!(
                 stdout,
                 "{}",
@@ -1250,11 +1324,11 @@ fn handle_recurring(
             Ok(())
         }
         RecurringCommand::List(RecurringListArgs { json }) => {
-            let rules = db.list_recurring_rules()?;
+            let rules = service.list()?;
             output::write_recurring_rules(stdout, &rules, json)
         }
         RecurringCommand::Pause(RecurringIdArgs { id }) => {
-            db.pause_recurring_rule(id)?;
+            service.pause(id)?;
             writeln!(
                 stdout,
                 "{}",
@@ -1263,7 +1337,7 @@ fn handle_recurring(
             Ok(())
         }
         RecurringCommand::Resume(RecurringIdArgs { id }) => {
-            db.resume_recurring_rule(id)?;
+            service.resume(id)?;
             writeln!(
                 stdout,
                 "{}",
@@ -1272,7 +1346,7 @@ fn handle_recurring(
             Ok(())
         }
         RecurringCommand::Delete(RecurringIdArgs { id }) => {
-            db.delete_recurring_rule(id)?;
+            service.delete(id)?;
             writeln!(
                 stdout,
                 "{}",
@@ -1285,7 +1359,7 @@ fn handle_recurring(
                 Some(value) => normalize_date(&value)?,
                 None => today_iso(),
             };
-            let posted = db.run_due_recurring(&through)?;
+            let posted = service.run_due(&through)?;
             writeln!(
                 stdout,
                 "{}",

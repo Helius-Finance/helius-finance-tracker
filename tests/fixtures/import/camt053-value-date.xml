@@ -1,0 +1,29 @@
+<Document>
+  <BkToCstmrStmt>
+    <Stmt>
+      <Ntry>
+        <Sts>BOOK</Sts>
+        <Amt Ccy="EUR">18.75</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <ValDt>
+          <Dt>2026-03-15</Dt>
+        </ValDt>
+        <NtryDtls>
+          <TxDtls>
+            <Refs>
+              <AcctSvcrRef>CAMT-VALUE-001</AcctSvcrRef>
+            </Refs>
+            <RltdPties>
+              <Cdtr>
+                <Nm>Cafe</Nm>
+              </Cdtr>
+            </RltdPties>
+            <RmtInf>
+              <Ustrd>Lunch</Ustrd>
+            </RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>

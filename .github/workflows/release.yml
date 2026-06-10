@@ -147,12 +147,25 @@ jobs:
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.checksum }}
 
+  docker-smoke:
+    name: Verify Docker Image
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Docker smoke flow
+        shell: pwsh
+        run: ./scripts/docker-smoke.ps1 -ImageTag "helius-release-check"
+
   publish:
     name: Publish GitHub Release
     if: github.ref_type == 'tag'
     needs:
       - build-windows
       - build-linux
+      - docker-smoke
     runs-on: ubuntu-22.04
 
     steps:

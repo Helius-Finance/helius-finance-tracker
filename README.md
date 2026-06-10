@@ -16,6 +16,7 @@ Supported targets: Windows x86_64 and Linux x86_64.
 - Direct CLI commands
 - SQLite storage in a single local database
 - Accounts, categories, income, expense, and transfer transactions
+- **25 bank CSV preset mappings** plus limited `camt.053` XML import; see the [Bank Import guide](wiki/Bank-Import.md)
 - Recurring rules, reconciliation, budgets, and cash-flow planning
 - JSON output for scripting and CSV export for reporting
 
@@ -25,8 +26,8 @@ Supported targets: Windows x86_64 and Linux x86_64.
 
 1. Open the [GitHub Releases](https://github.com/STVR393/helius-personal-finance-tracker/releases) page.
 2. Download the archive for your platform:
-   - Windows x86_64: `helius-v0.1.4-windows-x86_64.zip`
-   - Linux x86_64: `helius-v0.1.4-linux-x86_64.tar.gz`
+   - Windows x86_64: `helius-v1.4.1-windows-x86_64.zip`
+   - Linux x86_64: `helius-v1.4.1-linux-x86_64.tar.gz`
 3. Extract the archive into a folder you keep for apps or tools.
 4. Launch the binary for your platform:
 
@@ -114,6 +115,15 @@ helius balance
 helius tx list --limit 20
 ```
 
+Import bank data with presets ([full bank list](wiki/Bank-Import.md)):
+
+```powershell
+helius import csv --list-presets
+helius import csv --input .\chase.csv --account Checking --preset chase-us --dry-run
+helius import csv --input .\alpha-bank.csv --account Checking --preset alpha-bank-gr
+helius import camt053 --input .\statement.xml --account Checking --dry-run
+```
+
 If you are launching a binary directly instead of using `PATH`:
 
 ```powershell
@@ -190,6 +200,14 @@ Recurring rules:
 helius recurring add "Monthly Rent" --type expense --amount 290.00 --account Cash --category Housing --cadence monthly --day-of-month 6 --start-on 2026-03-17
 helius recurring list
 helius recurring run
+```
+
+Imports:
+
+```powershell
+helius import csv --input .\bank.csv --account Checking --preset revolut-csv --dry-run
+helius import csv --input .\bank.csv --account Checking --date-column Date --amount-column Amount --description-column Description --expense-category Groceries
+helius import camt053 --input .\statement.xml --account Checking --income-category Salary --expense-category Bills
 ```
 
 Planning:

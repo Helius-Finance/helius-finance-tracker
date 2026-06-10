@@ -9,7 +9,7 @@ use crate::amount::format_cents;
 use crate::error::AppError;
 use crate::model::{
     Account, BalanceRecord, BillCalendarItem, BudgetRecord, BudgetStatusRecord, Category,
-    CsvImportResult, ForecastSnapshot, GoalStatusRecord, ImportedTransactionRow,
+    ForecastSnapshot, GoalStatusRecord, ImportPresetSummary, ImportResult, ImportedTransactionRow,
     PlanningGoalRecord, PlanningItemRecord, PlanningScenarioRecord, ReconciliationRecord,
     RecurringRuleRecord, SummaryRecord, TransactionRecord,
 };
@@ -556,9 +556,9 @@ pub fn write_forecast(
     Ok(())
 }
 
-pub fn write_csv_import_result(
+pub fn write_import_result(
     writer: &mut dyn Write,
-    result: &CsvImportResult,
+    result: &ImportResult,
     as_json: bool,
 ) -> Result<(), AppError> {
     if as_json {
@@ -567,7 +567,7 @@ pub fn write_csv_import_result(
 
     let mut table = new_table();
     table.set_header(header_row([
-        "Line", "Date", "Type", "Amount", "Category", "Payee", "Status",
+        "Line", "Date", "Type", "Amount", "Category", "Payee", "Note", "Status",
     ]));
     for row in &result.preview {
         table.add_row(import_preview_row(row));
@@ -591,6 +591,38 @@ pub fn write_csv_import_result(
     )?;
     Ok(())
 }
+
+pub fn write_import_presets(
+    writer: &mut dyn Write,
+    presets: &[ImportPresetSummary],
+    as_json: bool,
+) -> Result<(), AppError> {
+    if as_json {
+        return write_json(writer, presets);
+    }
+
+    let mut table = new_table();
+    table.set_header(header_row(["Preset", "Label", "Verification"]));
+    for preset in presets {
+        table.add_row([
+            Cell::new(&preset.id),
+            Cell::new(&preset.label),
+            Cell::new(preset.verification.as_label()),
+        ]);
+    }
+    writeln!(writer, "{table}")?;
+    writeln!(
+        writer,
+        "{}",
+        label_text(
+            "first-party presets use project-maintained fixtures; \
+             community presets are maintained mappings with repository fixture coverage. \
+             Please open an issue if your bank's format differs.",
+        )
+    )?;
+    Ok(())
+}
+
 pub fn export_transactions_csv(
     path: &Path,
     transactions: &[TransactionRecord],
@@ -722,7 +754,7 @@ fn header_row<const N: usize>(labels: [&str; N]) -> Vec<Cell> {
         .collect()
 }
 
-fn import_preview_row(row: &ImportedTransactionRow) -> [Cell; 7] {
+fn import_preview_row(row: &ImportedTransactionRow) -> [Cell; 8] {
     [
         Cell::new(row.line_number),
         Cell::new(&row.txn_date),
@@ -733,12 +765,32 @@ fn import_preview_row(row: &ImportedTransactionRow) -> [Cell; 7] {
         })),
         Cell::new(row.category_name.as_deref().unwrap_or("-")),
         Cell::new(row.payee.as_deref().unwrap_or("-")),
+        Cell::new(
+            row.note
+                .as_deref()
+                .map(|note| truncate_cell(note, 48))
+                .unwrap_or_else(|| "-".to_string()),
+        ),
         Cell::new(if row.duplicate {
             warning_text("duplicate")
         } else {
             success_text("ready")
         }),
     ]
+}
+
+fn truncate_cell(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+    // Reserve space for the ellipsis so the cell does not exceed max_chars.
+    let keep = max_chars.saturating_sub(1);
+    let truncated: String = text.chars().take(keep).collect();
+    format!("{truncated}…")
 }
 
 fn money_text(amount_cents: i64) -> String {

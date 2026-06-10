@@ -1,0 +1,14 @@
+<Document>
+  <BkToCstmrStmt>
+    <Stmt>
+      <Ntry>
+        <Sts>BOOK</Sts>
+        <Amt Ccy="USD">120.00</Amt>
+        <CdtDbtInd>CRDT</CdtDbtInd>
+        <BookgDt>
+          <Dt>2026-03-16</Dt>
+        </BookgDt>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>

@@ -55,3 +55,15 @@ jobs:
             Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
           }
           ./scripts/smoke.ps1 -BinaryPath "${{ github.workspace }}/target/release/${{ matrix.binary_name }}"
+
+  docker-smoke:
+    name: Docker Smoke
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Docker smoke flow
+        shell: pwsh
+        run: ./scripts/docker-smoke.ps1 -ImageTag "helius-ci"

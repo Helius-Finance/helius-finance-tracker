@@ -11,14 +11,18 @@ use ratatui::Terminal;
 use crate::amount::{parse_amount_to_cents, parse_balance_to_cents};
 use crate::db::Db;
 use crate::error::AppError;
+use crate::importer::csv_mapping_defaults;
 use crate::model::{
     Account, BalanceRecord, BalanceTrendPoint, BudgetStatusRecord, Category, CategorySpendingPoint,
-    CsvImportPlan, CsvImportResult, ForecastSnapshot, MonthlyCashFlowPoint, NewPlanningGoal,
+    ForecastSnapshot, ImportKind, ImportPlan, ImportResult, MonthlyCashFlowPoint, NewPlanningGoal,
     NewPlanningItem, NewPlanningScenario, NewRecurringRule, PlanningGoalKind, PlanningGoalRecord,
     PlanningItemRecord, PlanningScenarioRecord, ReconciliationRecord, RecurringCadence,
     RecurringOccurrenceRecord, RecurringRuleRecord, SummaryRecord, TransactionFilters,
     TransactionKind, TransactionRecord, UpdatePlanningGoal, UpdatePlanningItem,
     UpdatePlanningScenario, UpdateRecurringRule, UpdateTransaction, Weekday, WeeklyBalancePoint,
+};
+use crate::services::import::{
+    Camt053ImportRequest, CsvImportRequest, ImportPreview, ImportRequest, ImportService,
 };
 use crate::today_iso;
 
@@ -113,7 +117,8 @@ pub(super) enum FormKind {
     PlanningScenarioAdd,
     PlanningScenarioEdit { id: i64 },
     TransactionFilter,
-    ImportCsv,
+    ImportSourceSelect,
+    ImportCsvMapping { setup: ImportSetupState },
     RecurringAdd,
     RecurringEdit { id: i64 },
     ReconcileStart,
@@ -154,6 +159,17 @@ impl FormState {
 }
 
 #[derive(Clone)]
+pub(super) struct ImportSetupState {
+    pub(super) format: ImportKind,
+    pub(super) file: String,
+    pub(super) account: String,
+    pub(super) preset_id: Option<String>,
+    pub(super) income_category: Option<String>,
+    pub(super) expense_category: Option<String>,
+    pub(super) allow_duplicates: bool,
+}
+
+#[derive(Clone)]
 pub(super) struct ReconcileSelectionState {
     pub(super) account_id: i64,
     pub(super) account_name: String,
@@ -186,16 +202,17 @@ impl ReconcileSelectionState {
 }
 
 #[derive(Clone)]
-pub(super) struct CsvImportReviewState {
-    pub(super) plan: CsvImportPlan,
-    pub(super) preview: CsvImportResult,
+pub(super) struct ImportReviewState {
+    pub(super) plan: ImportPlan,
+    pub(super) preview: ImportResult,
     pub(super) active: usize,
 }
 
 enum FormOutcome {
     Refresh(String),
+    OpenForm(FormState, String),
     OpenReconcile(ReconcileSelectionState, String),
-    OpenImportReview(CsvImportReviewState, String),
+    OpenImportReview(Box<ImportReviewState>, String),
 }
 
 pub(super) struct App {
@@ -242,7 +259,7 @@ pub(super) struct App {
     pub(super) form_replace_on_input: bool,
     pub(super) form_error: Option<String>,
     pub(super) reconcile_flow: Option<ReconcileSelectionState>,
-    pub(super) import_review: Option<CsvImportReviewState>,
+    pub(super) import_review: Option<ImportReviewState>,
     pub(super) command_log: Vec<String>,
     pub(super) status: String,
 }
@@ -298,7 +315,7 @@ impl App {
             command_log: vec![
                 "N opens a direct form for the current panel.".to_string(),
                 "E edits the selected item when that panel supports it.".to_string(),
-                "I opens CSV import from TRANSACTIONS or ACCOUNTS.".to_string(),
+                "I opens import from TRANSACTIONS or ACCOUNTS.".to_string(),
                 "F or / opens transaction filters inside TRANSACTIONS.".to_string(),
                 "S still opens raw command mode for power use.".to_string(),
             ],
@@ -334,16 +351,25 @@ impl App {
         let (from, to) = crate::current_month_range();
         let today = today_iso();
         self.currency = self.db.currency_code()?;
-        self.balances = self.db.balances(None)?;
-        self.accounts = self.db.list_accounts()?;
-        self.categories = self.db.list_categories()?;
-        self.recent_transactions = self.db.recent_transactions(6)?;
-        self.transactions = self.db.list_transactions(&self.tx_filters)?;
-        self.summary = self.db.summary(&from, &to, None)?;
-        self.cash_flow_trend = self.db.monthly_cash_flow_trend(6)?;
-        self.category_spending = self.db.category_spending(&from, &to, 6)?;
-        self.balance_trend = self.db.total_balance_trend(6)?;
-        self.planning_scenarios = self.db.list_planning_scenarios()?;
+        self.balances =
+            crate::services::reporting::ReportingService::new(&self.db).balances(None)?;
+        self.accounts = crate::services::accounts::AccountService::new(&self.db)
+            .list(crate::services::accounts::ListAccountsRequest)?;
+        self.categories = crate::services::categories::CategoryService::new(&self.db)
+            .list(crate::services::categories::ListCategoriesRequest)?;
+        self.recent_transactions =
+            crate::services::transactions::TransactionService::new(&self.db).recent(6)?;
+        self.transactions = crate::services::transactions::TransactionService::new(&self.db)
+            .list(&self.tx_filters)?;
+        {
+            let svc = crate::services::reporting::ReportingService::new(&self.db);
+            self.summary = svc.summary(&from, &to, None)?;
+            self.cash_flow_trend = svc.monthly_cash_flow_trend(6)?;
+            self.category_spending = svc.category_spending(&from, &to, 6)?;
+            self.balance_trend = svc.total_balance_trend(6)?;
+        }
+        self.planning_scenarios =
+            crate::services::planning::PlanningService::new(&self.db).list_scenarios()?;
         if self
             .selected_planning_scenario_id
             .is_some_and(|selected_id| {
@@ -356,19 +382,26 @@ impl App {
             self.selected_planning_scenario_id = None;
         }
         let selected_scenario = self.selected_planning_scenario_id.map(|id| id.to_string());
-        self.budgets = self
-            .db
-            .budget_status(&today[..7], selected_scenario.as_deref())?;
-        self.planning_actual_weekly = self.db.weekly_opening_balance_history(10)?;
-        self.planning_baseline = self.db.forecast(None, None, 90)?;
-        self.planning_forecast = self.db.forecast(selected_scenario.as_deref(), None, 90)?;
-        self.planning_items =
-            self.db
-                .list_planning_items(selected_scenario.as_deref(), None, None)?;
-        self.planning_goals = self.db.list_planning_goals()?;
-        self.recurring_rules = self.db.list_recurring_rules()?;
-        self.due_occurrences = self.db.list_due_occurrences(&today)?;
-        self.reconciliations = self.db.list_reconciliations(None)?;
+        self.budgets = crate::services::budgets::BudgetService::new(&self.db)
+            .status(&today[..7], selected_scenario.as_deref())?;
+        {
+            let svc = crate::services::reporting::ReportingService::new(&self.db);
+            self.planning_actual_weekly = svc.weekly_opening_balance_history(10)?;
+            self.planning_baseline = svc.forecast(None, None, 90)?;
+            self.planning_forecast = svc.forecast(selected_scenario.as_deref(), None, 90)?;
+        }
+        {
+            let svc = crate::services::planning::PlanningService::new(&self.db);
+            self.planning_items = svc.list_items(selected_scenario.as_deref(), None, None)?;
+            self.planning_goals = svc.list_goals()?;
+        }
+        {
+            let svc = crate::services::recurring::RecurringService::new(&self.db);
+            self.recurring_rules = svc.list()?;
+            self.due_occurrences = svc.list_due(&today)?;
+        }
+        self.reconciliations =
+            crate::services::reconciliation::ReconciliationService::new(&self.db).list(None)?;
         self.clamp_indices();
         Ok(())
     }
@@ -470,7 +503,8 @@ impl App {
                 'j' => self.move_selection(1),
                 'k' => self.move_selection(-1),
                 'g' => {
-                    let result = self.db.run_due_recurring(&today_iso());
+                    let result = crate::services::recurring::RecurringService::new(&self.db)
+                        .run_due(&today_iso());
                     match result {
                         Ok(count) => {
                             self.refresh()?;
@@ -801,11 +835,12 @@ impl App {
         let Some(transaction) = self.transactions.get(self.tx_index).cloned() else {
             return Err(AppError::Validation("no transaction selected".to_string()));
         };
+        let svc = crate::services::transactions::TransactionService::new(&self.db);
         if transaction.deleted_at.is_some() {
-            self.db.restore_transaction(transaction.id)?;
+            svc.restore(transaction.id)?;
             self.status = format!("Restored transaction {}.", transaction.id);
         } else {
-            self.db.delete_transaction(transaction.id)?;
+            svc.delete(transaction.id)?;
             self.status = format!("Deleted transaction {}.", transaction.id);
         }
         self.refresh()?;
@@ -818,7 +853,11 @@ impl App {
             .get(self.category_index)
             .map(|category| category.id)
             .ok_or_else(|| AppError::Validation("no category selected".to_string()))?;
-        self.db.delete_category(&category_id.to_string())?;
+        crate::services::categories::CategoryService::new(&self.db).delete(
+            crate::services::categories::DeleteCategoryRequest {
+                reference: category_id.to_string(),
+            },
+        )?;
         self.refresh()?;
         self.status = format!("Archived category {category_id}.");
         Ok(())
@@ -830,7 +869,11 @@ impl App {
             .get(self.account_index)
             .cloned()
             .ok_or_else(|| AppError::Validation("no account selected".to_string()))?;
-        self.db.delete_account(&account.id.to_string())?;
+        crate::services::accounts::AccountService::new(&self.db).delete(
+            crate::services::accounts::DeleteAccountRequest {
+                reference: account.id.to_string(),
+            },
+        )?;
         self.refresh()?;
         self.status = format!("Archived account {}.", account.name);
         Ok(())
@@ -848,7 +891,7 @@ impl App {
                     .to_string(),
             ));
         }
-        self.db.delete_budget(
+        crate::services::budgets::BudgetService::new(&self.db).delete(
             &row.month,
             &row.category_name,
             row.scenario_name.as_deref().filter(|_| row.is_override),
@@ -911,7 +954,8 @@ impl App {
                     );
                     Ok(())
                 } else {
-                    let transaction_id = self.db.post_planning_item(item_id)?;
+                    let transaction_id = crate::services::planning::PlanningService::new(&self.db)
+                        .post_item(item_id)?;
                     self.refresh()?;
                     self.status =
                         format!("Posted planning item {item_id} as transaction {transaction_id}.");
@@ -949,7 +993,7 @@ impl App {
                     .get(self.planning_item_index)
                     .map(|item| item.id)
                     .ok_or_else(|| AppError::Validation("no planning item selected".to_string()))?;
-                self.db.delete_planning_item(item_id)?;
+                crate::services::planning::PlanningService::new(&self.db).delete_item(item_id)?;
                 self.refresh()?;
                 self.status = format!("Archived planning item {item_id}.");
                 Ok(())
@@ -960,7 +1004,7 @@ impl App {
                     .get(self.planning_goal_index)
                     .map(|goal| goal.id)
                     .ok_or_else(|| AppError::Validation("no goal selected".to_string()))?;
-                self.db.delete_planning_goal(goal_id)?;
+                crate::services::planning::PlanningService::new(&self.db).delete_goal(goal_id)?;
                 self.refresh()?;
                 self.status = format!("Archived goal {goal_id}.");
                 Ok(())
@@ -974,7 +1018,8 @@ impl App {
                 };
                 let scenario_id = scenario.id;
                 let scenario_name = scenario.name.clone();
-                self.db.delete_planning_scenario(scenario_id)?;
+                crate::services::planning::PlanningService::new(&self.db)
+                    .delete_scenario(scenario_id)?;
                 if self.selected_planning_scenario_id == Some(scenario_id) {
                     self.selected_planning_scenario_id = None;
                 }
@@ -1002,7 +1047,7 @@ impl App {
             .get(self.recurring_index)
             .map(|rule| rule.id)
             .ok_or_else(|| AppError::Validation("no recurring rule selected".to_string()))?;
-        self.db.delete_recurring_rule(rule_id)?;
+        crate::services::recurring::RecurringService::new(&self.db).delete(rule_id)?;
         self.refresh()?;
         self.status = format!("Deleted recurring rule {rule_id}.");
         Ok(())
@@ -1015,10 +1060,10 @@ impl App {
             ));
         };
         if rule.paused {
-            self.db.resume_recurring_rule(rule.id)?;
+            crate::services::recurring::RecurringService::new(&self.db).resume(rule.id)?;
             self.status = format!("Resumed recurring rule {}.", rule.id);
         } else {
-            self.db.pause_recurring_rule(rule.id)?;
+            crate::services::recurring::RecurringService::new(&self.db).pause(rule.id)?;
             self.status = format!("Paused recurring rule {}.", rule.id);
         }
         self.refresh()?;
@@ -1031,7 +1076,8 @@ impl App {
             .get(self.reconciliation_index)
             .map(|reconciliation| reconciliation.id)
             .ok_or_else(|| AppError::Validation("no reconciliation selected".to_string()))?;
-        self.db.delete_reconciliation(reconciliation_id)?;
+        crate::services::reconciliation::ReconciliationService::new(&self.db)
+            .delete(reconciliation_id)?;
         self.refresh()?;
         self.status = format!("Removed reconciliation {reconciliation_id}.");
         Ok(())
@@ -1103,13 +1149,13 @@ impl App {
             View::Transactions | View::Accounts => self.import_form(),
             _ => {
                 return Err(AppError::Validation(
-                    "CSV import is available from TRANSACTIONS or ACCOUNTS".to_string(),
+                    "import is available from TRANSACTIONS or ACCOUNTS".to_string(),
                 ));
             }
         });
         self.open_form(
             form,
-            "Import setup active. Fill the CSV fields and press Enter, Ctrl+S, or F2 for a dry-run preview.",
+            "Import setup active. Choose CSV or camt053, then press Enter, Ctrl+S, or F2 to continue.",
         );
         Ok(())
     }
@@ -1152,21 +1198,148 @@ impl App {
     }
     fn import_form(&self) -> FormState {
         FormState {
-            kind: FormKind::ImportCsv,
-            title: "IMPORT CSV",
-            hint: "Load a bank CSV, preview what will be created, then confirm the import from the review screen.",
+            kind: FormKind::ImportSourceSelect,
+            title: "IMPORT",
+            hint: "Step 1 picks the import source. CSV opens a mapping screen next, while camt053 goes straight to preview. INCOME/EXPENSE CATEGORY optionally override the uncategorized fallback for both formats.",
             fields: vec![
-                FormField { label: "FILE", value: String::new(), required: true },
-                FormField { label: "ACCOUNT", value: self.selected_account_name(), required: true },
-                FormField { label: "DATE COLUMN", value: "Date".to_string(), required: true },
-                FormField { label: "AMOUNT COLUMN", value: "Amount".to_string(), required: true },
-                FormField { label: "DESCRIPTION COL", value: "Description".to_string(), required: true },
-                FormField { label: "CATEGORY COL", value: String::new(), required: false },
-                FormField { label: "DEFAULT CATEGORY", value: self.default_expense_category(), required: false },
-                FormField { label: "TYPE COLUMN", value: String::new(), required: false },
-                FormField { label: "DEFAULT TYPE", value: String::new(), required: false },
-                FormField { label: "DATE FORMAT", value: "%Y-%m-%d".to_string(), required: true },
-                FormField { label: "ALLOW DUPES", value: "no".to_string(), required: true },
+                FormField {
+                    label: "FORMAT",
+                    value: "csv".to_string(),
+                    required: true,
+                },
+                FormField {
+                    label: "FILE",
+                    value: String::new(),
+                    required: true,
+                },
+                FormField {
+                    label: "ACCOUNT",
+                    value: self.selected_account_name(),
+                    required: true,
+                },
+                FormField {
+                    label: "PRESET",
+                    value: String::new(),
+                    required: false,
+                },
+                FormField {
+                    label: "INCOME CATEGORY",
+                    value: String::new(),
+                    required: false,
+                },
+                FormField {
+                    label: "EXPENSE CATEGORY",
+                    value: String::new(),
+                    required: false,
+                },
+                FormField {
+                    label: "ALLOW DUPES",
+                    value: "no".to_string(),
+                    required: true,
+                },
+            ],
+            active: 0,
+        }
+    }
+
+    fn import_csv_mapping_form(
+        &self,
+        setup: ImportSetupState,
+        defaults: crate::importer::CsvMappingDefaults,
+    ) -> FormState {
+        // Let step-1 income/expense overrides pre-populate the step-2 fields so
+        // the values the user typed in the source-select form are not lost.
+        let income_default = setup
+            .income_category
+            .clone()
+            .unwrap_or_else(|| self.default_income_category());
+        let expense_default = setup
+            .expense_category
+            .clone()
+            .unwrap_or_else(|| self.default_expense_category());
+        FormState {
+            kind: FormKind::ImportCsvMapping { setup },
+            title: "IMPORT CSV MAPPING",
+            hint: "Step 2 maps the CSV columns. Blank fallback categories use the built-in uncategorized income/expense buckets.",
+            fields: vec![
+                FormField {
+                    label: "DATE COLUMN",
+                    value: defaults.date_column,
+                    required: true,
+                },
+                FormField {
+                    label: "AMOUNT COLUMN",
+                    value: defaults.amount_column.unwrap_or_default(),
+                    required: false,
+                },
+                FormField {
+                    label: "DEBIT COLUMN",
+                    value: defaults.debit_column.unwrap_or_default(),
+                    required: false,
+                },
+                FormField {
+                    label: "CREDIT COLUMN",
+                    value: defaults.credit_column.unwrap_or_default(),
+                    required: false,
+                },
+                FormField {
+                    label: "DESCRIPTION COL",
+                    value: defaults.description_column,
+                    required: true,
+                },
+                FormField {
+                    label: "PAYEE COLUMN",
+                    value: defaults.payee_column.unwrap_or_default(),
+                    required: false,
+                },
+                FormField {
+                    label: "NOTE COLUMN",
+                    value: defaults.note_column.unwrap_or_default(),
+                    required: false,
+                },
+                FormField {
+                    label: "TYPE COLUMN",
+                    value: defaults.type_column.unwrap_or_default(),
+                    required: false,
+                },
+                FormField {
+                    label: "CATEGORY COL",
+                    value: defaults.category_column.unwrap_or_default(),
+                    required: false,
+                },
+                FormField {
+                    label: "DEFAULT CATEGORY",
+                    value: String::new(),
+                    required: false,
+                },
+                FormField {
+                    label: "EXPENSE CATEGORY",
+                    value: expense_default,
+                    required: false,
+                },
+                FormField {
+                    label: "INCOME CATEGORY",
+                    value: income_default,
+                    required: false,
+                },
+                FormField {
+                    label: "DEFAULT TYPE",
+                    value: defaults
+                        .default_kind
+                        .map(|kind| kind.as_db_str().to_string())
+                        .unwrap_or_default(),
+                    required: false,
+                },
+                FormField {
+                    label: "DATE FORMAT",
+                    value: defaults.date_format,
+                    required: true,
+                },
+                FormField {
+                    label: "DELIMITER",
+                    value: defaults.delimiter.to_string(),
+                    required: true,
+                },
             ],
             active: 0,
         }
@@ -1896,6 +2069,14 @@ impl App {
             .unwrap_or_default()
     }
 
+    fn default_income_category(&self) -> String {
+        self.categories
+            .iter()
+            .find(|category| category.kind.as_db_str() == "income")
+            .map(|category| category.name.clone())
+            .unwrap_or_default()
+    }
+
     fn default_budget_category(&self) -> String {
         self.categories
             .get(self.category_index)
@@ -1952,12 +2133,13 @@ impl App {
         };
         let mut transaction_ids: Vec<i64> = flow.selected_ids.iter().copied().collect();
         transaction_ids.sort_unstable();
-        let reconciliation_id = self.db.start_reconciliation(
-            &flow.account_name,
-            &flow.statement_ending_on,
-            flow.statement_balance_cents,
-            &transaction_ids,
-        )?;
+        let reconciliation_id =
+            crate::services::reconciliation::ReconciliationService::new(&self.db).start(
+                &flow.account_name,
+                &flow.statement_ending_on,
+                flow.statement_balance_cents,
+                &transaction_ids,
+            )?;
         self.reconcile_flow = None;
         self.refresh()?;
         self.status = format!("Created reconciliation {reconciliation_id}.");
@@ -1985,6 +2167,10 @@ impl App {
                 self.refresh()?;
                 self.status = message;
             }
+            FormOutcome::OpenForm(form, message) => {
+                self.open_form(Some(form), &message);
+                self.status = message;
+            }
             FormOutcome::OpenReconcile(flow, message) => {
                 self.clear_form_state();
                 self.reconcile_flow = Some(flow);
@@ -1992,7 +2178,7 @@ impl App {
             }
             FormOutcome::OpenImportReview(review, message) => {
                 self.clear_form_state();
-                self.import_review = Some(review);
+                self.import_review = Some(*review);
                 self.status = message;
             }
         }
@@ -2015,7 +2201,8 @@ impl App {
             FormKind::PlanningScenarioAdd => self.save_new_planning_scenario(form),
             FormKind::PlanningScenarioEdit { id } => self.save_planning_scenario_edit(id, form),
             FormKind::TransactionFilter => self.save_transaction_filters(form),
-            FormKind::ImportCsv => self.save_import_preview(form),
+            FormKind::ImportSourceSelect => self.advance_import_setup(form),
+            FormKind::ImportCsvMapping { setup } => self.save_import_preview(&setup, form),
             FormKind::RecurringAdd => self.save_new_recurring_rule(form),
             FormKind::RecurringEdit { id } => self.save_recurring_edit(id, form),
             FormKind::ReconcileStart => self.start_reconciliation_review(form),
@@ -2034,7 +2221,8 @@ impl App {
             note: optional_field(form, 7),
             recurring_rule_id: None,
         };
-        let transaction_id = self.db.add_transaction(&transaction)?;
+        let transaction_id =
+            crate::services::transactions::TransactionService::new(&self.db).add(&transaction)?;
         Ok(FormOutcome::Refresh(format!(
             "Created transaction {transaction_id}."
         )))
@@ -2061,17 +2249,19 @@ impl App {
             clear_payee: optional_field(form, 6).is_none(),
             clear_note: optional_field(form, 7).is_none(),
         };
-        self.db.edit_transaction(&patch)?;
+        crate::services::transactions::TransactionService::new(&self.db).edit(&patch)?;
         Ok(FormOutcome::Refresh(format!("Updated transaction {id}.")))
     }
 
     fn save_new_account(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
         let kind = parse_account_kind(form_value(form, 1))?;
-        let account_id = self.db.add_account(
-            form_value(form, 0).trim(),
-            &kind,
-            parse_balance_to_cents(form_value(form, 2))?,
-            &normalize_date_input(form_value(form, 3))?,
+        let account_id = crate::services::accounts::AccountService::new(&self.db).add(
+            crate::services::accounts::AddAccountRequest {
+                name: form_value(form, 0).trim().to_string(),
+                kind,
+                opening_balance_cents: parse_balance_to_cents(form_value(form, 2))?,
+                opened_on: normalize_date_input(form_value(form, 3))?,
+            },
         )?;
         Ok(FormOutcome::Refresh(format!(
             "Created account {account_id}."
@@ -2080,19 +2270,26 @@ impl App {
 
     fn save_account_edit(&mut self, id: i64, form: &FormState) -> Result<FormOutcome, AppError> {
         let kind = parse_account_kind(form_value(form, 1))?;
-        self.db.edit_account(
-            &id.to_string(),
-            Some(form_value(form, 0).trim()),
-            Some(&kind),
-            Some(parse_balance_to_cents(form_value(form, 2))?),
-            Some(&normalize_date_input(form_value(form, 3))?),
+        crate::services::accounts::AccountService::new(&self.db).edit(
+            crate::services::accounts::EditAccountRequest {
+                reference: id.to_string(),
+                name: Some(form_value(form, 0).trim().to_string()),
+                kind: Some(kind),
+                opening_balance_cents: Some(parse_balance_to_cents(form_value(form, 2))?),
+                opened_on: Some(normalize_date_input(form_value(form, 3))?),
+            },
         )?;
         Ok(FormOutcome::Refresh(format!("Updated account {id}.")))
     }
 
     fn save_new_category(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
         let kind = parse_category_kind(form_value(form, 1))?;
-        let category_id = self.db.add_category(form_value(form, 0).trim(), &kind)?;
+        let category_id = crate::services::categories::CategoryService::new(&self.db).add(
+            crate::services::categories::AddCategoryRequest {
+                name: form_value(form, 0).trim().to_string(),
+                kind,
+            },
+        )?;
         Ok(FormOutcome::Refresh(format!(
             "Created category {category_id}."
         )))
@@ -2100,16 +2297,18 @@ impl App {
 
     fn save_category_edit(&mut self, id: i64, form: &FormState) -> Result<FormOutcome, AppError> {
         let kind = parse_category_kind(form_value(form, 1))?;
-        self.db.edit_category(
-            &id.to_string(),
-            Some(form_value(form, 0).trim()),
-            Some(&kind),
+        crate::services::categories::CategoryService::new(&self.db).edit(
+            crate::services::categories::EditCategoryRequest {
+                reference: id.to_string(),
+                name: Some(form_value(form, 0).trim().to_string()),
+                kind: Some(kind),
+            },
         )?;
         Ok(FormOutcome::Refresh(format!("Updated category {id}.")))
     }
 
     fn save_budget(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
-        let budget_id = self.db.set_budget(
+        let budget_id = crate::services::budgets::BudgetService::new(&self.db).set(
             form_value(form, 1).trim(),
             form_value(form, 0).trim(),
             parse_amount_to_cents(form_value(form, 2))?,
@@ -2132,7 +2331,7 @@ impl App {
             payee: optional_field(form, 8),
             note: optional_field(form, 9),
         };
-        let item_id = self.db.add_planning_item(&item)?;
+        let item_id = crate::services::planning::PlanningService::new(&self.db).add_item(&item)?;
         Ok(FormOutcome::Refresh(format!(
             "Created planning item {item_id}."
         )))
@@ -2161,7 +2360,7 @@ impl App {
             clear_payee: optional_field(form, 8).is_none(),
             clear_note: optional_field(form, 9).is_none(),
         };
-        self.db.edit_planning_item(&patch)?;
+        crate::services::planning::PlanningService::new(&self.db).edit_item(&patch)?;
         Ok(FormOutcome::Refresh(format!("Updated planning item {id}.")))
     }
 
@@ -2180,7 +2379,7 @@ impl App {
                 .map(|value| normalize_date_input(&value))
                 .transpose()?,
         };
-        let goal_id = self.db.add_planning_goal(&goal)?;
+        let goal_id = crate::services::planning::PlanningService::new(&self.db).add_goal(&goal)?;
         Ok(FormOutcome::Refresh(format!("Created goal {goal_id}.")))
     }
 
@@ -2207,16 +2406,18 @@ impl App {
             clear_minimum_balance: optional_field(form, 4).is_none(),
             clear_due_on: optional_field(form, 5).is_none(),
         };
-        self.db.edit_planning_goal(&patch)?;
+        crate::services::planning::PlanningService::new(&self.db).edit_goal(&patch)?;
         Ok(FormOutcome::Refresh(format!("Updated goal {id}.")))
     }
 
     fn save_new_planning_scenario(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
         let scenario_name = form_value(form, 0).trim().to_string();
-        let scenario_id = self.db.add_planning_scenario(&NewPlanningScenario {
-            name: scenario_name.clone(),
-            note: optional_field(form, 1),
-        })?;
+        let scenario_id = crate::services::planning::PlanningService::new(&self.db).add_scenario(
+            &NewPlanningScenario {
+                name: scenario_name.clone(),
+                note: optional_field(form, 1),
+            },
+        )?;
         Ok(FormOutcome::Refresh(format!(
             "Created scenario {scenario_name} (id {scenario_id})."
         )))
@@ -2228,12 +2429,14 @@ impl App {
         form: &FormState,
     ) -> Result<FormOutcome, AppError> {
         let scenario_name = form_value(form, 0).trim().to_string();
-        self.db.edit_planning_scenario(&UpdatePlanningScenario {
-            id,
-            name: Some(scenario_name.clone()),
-            note: optional_field(form, 1),
-            clear_note: optional_field(form, 1).is_none(),
-        })?;
+        crate::services::planning::PlanningService::new(&self.db).edit_scenario(
+            &UpdatePlanningScenario {
+                id,
+                name: Some(scenario_name.clone()),
+                note: optional_field(form, 1),
+                clear_note: optional_field(form, 1).is_none(),
+            },
+        )?;
         Ok(FormOutcome::Refresh(format!(
             "Updated scenario {scenario_name} (id {id})."
         )))
@@ -2255,19 +2458,58 @@ impl App {
         };
         Ok(FormOutcome::Refresh(format!(
             "Applied transaction filters. Loaded {} rows.",
-            self.db.list_transactions(&self.tx_filters)?.len()
+            crate::services::transactions::TransactionService::new(&self.db)
+                .list(&self.tx_filters)?
+                .len()
         )))
     }
 
-    fn save_import_preview(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
-        let plan = build_import_plan(form, true)?;
-        let preview = self.db.import_csv_transactions(&plan)?;
+    fn advance_import_setup(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
+        let setup = build_import_setup(form)?;
+        match setup.format {
+            ImportKind::Csv => {
+                let mapping = self.import_csv_mapping_form(
+                    setup.clone(),
+                    csv_mapping_defaults(setup.preset_id.as_deref())?,
+                );
+                Ok(FormOutcome::OpenForm(
+                    mapping,
+                    String::from(
+                        "CSV mapping active. Adjust the columns and press Enter, Ctrl+S, or F2 for a preview.",
+                    ),
+                ))
+            }
+            ImportKind::Camt053 => {
+                let request = Camt053ImportRequest {
+                    path: PathBuf::from(&setup.file),
+                    account: setup.account.clone(),
+                    income_category: setup.income_category.clone(),
+                    expense_category: setup.expense_category.clone(),
+                    dry_run: true,
+                    allow_duplicates: setup.allow_duplicates,
+                };
+                let preview =
+                    ImportService::new(&self.db).preview(ImportRequest::Camt053(request))?;
+                Ok(FormOutcome::OpenImportReview(
+                    Box::new(review_state_from_preview(preview)),
+                    String::from(
+                        "Import preview loaded. Review the rows and press Ctrl+S or F2 to confirm the real import.",
+                    ),
+                ))
+            }
+        }
+    }
+
+    fn save_import_preview(
+        &mut self,
+        setup: &ImportSetupState,
+        form: &FormState,
+    ) -> Result<FormOutcome, AppError> {
+        let request = build_csv_import_request(setup, form)?;
+        let preview =
+            ImportService::new(&self.db).preview(ImportRequest::Csv(Box::new(request)))?;
         Ok(FormOutcome::OpenImportReview(
-            CsvImportReviewState {
-                plan,
-                preview,
-                active: 0,
-            },
+            Box::new(review_state_from_preview(preview)),
             String::from(
                 "Import preview loaded. Review the rows and press Ctrl+S or F2 to confirm the real import.",
             ),
@@ -2278,9 +2520,11 @@ impl App {
         let Some(review) = self.import_review.clone() else {
             return Ok(());
         };
-        let mut plan = review.plan;
-        plan.dry_run = false;
-        let result = self.db.import_csv_transactions(&plan)?;
+        let preview = ImportPreview {
+            plan: review.plan,
+            result: review.preview,
+        };
+        let result = ImportService::new(&self.db).commit(preview)?;
         self.import_review = None;
         self.refresh()?;
         self.status = format!(
@@ -2292,7 +2536,7 @@ impl App {
 
     fn save_new_recurring_rule(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
         let rule = build_new_recurring_rule(form)?;
-        let rule_id = self.db.add_recurring_rule(&rule)?;
+        let rule_id = crate::services::recurring::RecurringService::new(&self.db).add(&rule)?;
         Ok(FormOutcome::Refresh(format!(
             "Created recurring rule {rule_id}."
         )))
@@ -2333,7 +2577,7 @@ impl App {
             clear_next_due_on: optional_field(form, 13).is_none(),
             clear_end_on: optional_field(form, 14).is_none(),
         };
-        self.db.edit_recurring_rule(&patch)?;
+        crate::services::recurring::RecurringService::new(&self.db).edit(&patch)?;
         Ok(FormOutcome::Refresh(format!(
             "Updated recurring rule {id}."
         )))
@@ -2414,7 +2658,7 @@ impl App {
         if lowercase == "help" {
             self.append_command_result(
                 "help",
-                "Shortcuts: income, expense, transfer, account, category, budget, balance, transactions, summary, recurring, reconcile, forecast, scenario, goal\nFull commands also work here, for example:\n  tx list --limit 10\n  balance\n  forecast show\n  scenario list\n  recurring list\n  import csv --input bank.csv --account Checking --date-column Date --amount-column Amount --description-column Description --category Groceries --dry-run",
+                "Shortcuts: income, expense, transfer, account, category, budget, balance, transactions, summary, recurring, reconcile, forecast, scenario, goal\nFull commands also work here, for example:\n  tx list --limit 10\n  balance\n  forecast show\n  scenario list\n  recurring list\n  import csv --list-presets\n  import csv --input bank.csv --account Checking --preset revolut-csv --dry-run",
             );
             self.input_buffer.clear();
             self.status = String::from("Examples added to the command log.");
@@ -2546,10 +2790,10 @@ impl App {
         match self.current_view() {
             View::Dashboard => String::from("N new transaction | S commands | ?: help | Q quit"),
             View::Transactions => String::from(
-                "N new | E edit | F or / filter | C clear | I import CSV | D delete/restore | S commands",
+                "N new | E edit | F or / filter | C clear | I import data | D delete/restore | S commands",
             ),
             View::Accounts => String::from(
-                "N new | E edit | D archive unused | I import CSV | R reconcile selected | S commands",
+                "N new | E edit | D archive unused | I import data | R reconcile selected | S commands",
             ),
             View::Categories => String::from("N new | E edit | D archive | S commands"),
             View::Summary => String::from("N set budget | charts are read-only here"),
@@ -2599,29 +2843,62 @@ fn default_transaction_filters() -> TransactionFilters {
         include_deleted: false,
     }
 }
-fn build_import_plan(form: &FormState, dry_run: bool) -> Result<CsvImportPlan, AppError> {
-    let path_text = form_value(form, 0).trim();
-    if path_text.is_empty() {
+fn build_import_setup(form: &FormState) -> Result<ImportSetupState, AppError> {
+    let format = parse_import_kind(form_value(form, 0))?;
+    let file = form_value(form, 1).trim().to_string();
+    if file.is_empty() {
         return Err(AppError::Validation("FILE is required".to_string()));
     }
-    let delimiter = b',';
-    Ok(CsvImportPlan {
-        path: PathBuf::from(path_text),
-        account: form_value(form, 1).trim().to_string(),
-        date_column: form_value(form, 2).trim().to_string(),
-        amount_column: form_value(form, 3).trim().to_string(),
-        description_column: form_value(form, 4).trim().to_string(),
-        category_column: optional_field(form, 5),
-        category: optional_field(form, 6),
-        payee_column: None,
-        note_column: None,
-        type_column: optional_field(form, 7),
-        default_kind: parse_optional_default_kind(optional_field(form, 8))?,
-        date_format: form_value(form, 9).trim().to_string(),
-        delimiter,
-        dry_run,
-        allow_duplicates: parse_yes_no(form_value(form, 10), "ALLOW DUPES")?,
+    Ok(ImportSetupState {
+        format,
+        file,
+        account: form_value(form, 2).trim().to_string(),
+        preset_id: optional_field(form, 3),
+        income_category: optional_field(form, 4),
+        expense_category: optional_field(form, 5),
+        allow_duplicates: parse_yes_no(form_value(form, 6), "ALLOW DUPES")?,
     })
+}
+
+fn build_csv_import_request(
+    setup: &ImportSetupState,
+    form: &FormState,
+) -> Result<CsvImportRequest, AppError> {
+    let delimiter = parse_single_ascii_char(form_value(form, 14), "DELIMITER")? as u8;
+    Ok(CsvImportRequest {
+        path: PathBuf::from(&setup.file),
+        account: setup.account.clone(),
+        preset_id: setup.preset_id.clone(),
+        date_column: optional_field(form, 0),
+        amount_column: optional_field(form, 1),
+        debit_column: optional_field(form, 2),
+        credit_column: optional_field(form, 3),
+        description_column: optional_field(form, 4),
+        category_column: optional_field(form, 8),
+        category: optional_field(form, 9),
+        income_category: optional_field(form, 11),
+        expense_category: optional_field(form, 10),
+        payee_column: optional_field(form, 5),
+        note_column: optional_field(form, 6),
+        type_column: optional_field(form, 7),
+        default_kind: parse_optional_default_kind(optional_field(form, 12))?,
+        date_format: optional_field(form, 13),
+        delimiter: Some(delimiter),
+        // ImportService::preview always forces dry_run=true; the value here
+        // is irrelevant for the preview path. Set to false so any callers
+        // that go straight to ImportService::execute see committing semantics
+        // (matches the previous "real import" flow when dry_run was false).
+        dry_run: false,
+        allow_duplicates: setup.allow_duplicates,
+    })
+}
+
+fn review_state_from_preview(preview: ImportPreview) -> ImportReviewState {
+    ImportReviewState {
+        plan: preview.plan,
+        preview: preview.result,
+        active: 0,
+    }
 }
 fn build_new_recurring_rule(form: &FormState) -> Result<NewRecurringRule, AppError> {
     let cadence = parse_recurring_cadence(form_value(form, 8))?;
@@ -2708,6 +2985,31 @@ fn parse_yes_no(raw: &str, label: &str) -> Result<bool, AppError> {
         _ => Err(AppError::Validation(format!("{label} must be yes or no"))),
     }
 }
+
+fn parse_single_ascii_char(raw: &str, label: &str) -> Result<char, AppError> {
+    let trimmed = raw.trim();
+    let mut chars = trimmed.chars();
+    let value = chars
+        .next()
+        .ok_or_else(|| AppError::Validation(format!("{label} is required")))?;
+    if chars.next().is_some() || !value.is_ascii() {
+        return Err(AppError::Validation(format!(
+            "{label} must be a single ASCII character"
+        )));
+    }
+    Ok(value)
+}
+
+fn parse_import_kind(raw: &str) -> Result<ImportKind, AppError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "csv" => Ok(ImportKind::Csv),
+        "camt053" | "camt.053" | "camt_053" => Ok(ImportKind::Camt053),
+        _ => Err(AppError::Validation(
+            "FORMAT must be csv or camt053".to_string(),
+        )),
+    }
+}
+
 fn parse_transaction_kind(raw: &str) -> Result<TransactionKind, AppError> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "income" => Ok(TransactionKind::Income),
@@ -2878,11 +3180,54 @@ fn transaction_effect_for_account(account_id: i64, transaction: &TransactionReco
 mod tests {
     use super::{
         apply_form_backspace, apply_form_text_input, build_new_recurring_rule, is_form_submit_key,
-        normalize_input_command_tokens, should_handle_key_event, FormField, FormKind, FormState,
-        View,
+        normalize_input_command_tokens, should_handle_key_event, App, FormField, FormKind,
+        FormState, View,
     };
+    use crate::db::Db;
     use crate::model::RecurringCadence;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use tempfile::TempDir;
+
+    fn test_app() -> (TempDir, App) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("tracker.db");
+        let db = Db::open_for_init(&db_path).unwrap();
+        db.init("USD").unwrap();
+        drop(db);
+        (temp_dir, App::new(db_path).unwrap())
+    }
+
+    fn open_view(app: &mut App, target: View) {
+        app.current_view = View::all()
+            .iter()
+            .position(|view| {
+                matches!(
+                    (view, target),
+                    (View::Dashboard, View::Dashboard)
+                        | (View::Transactions, View::Transactions)
+                        | (View::Accounts, View::Accounts)
+                        | (View::Categories, View::Categories)
+                        | (View::Summary, View::Summary)
+                        | (View::Budgets, View::Budgets)
+                        | (View::Planning, View::Planning)
+                        | (View::Recurring, View::Recurring)
+                        | (View::Reconcile, View::Reconcile)
+                )
+            })
+            .unwrap();
+    }
+
+    fn form_text(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            app.handle_form_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+    }
+
+    fn form_tab(app: &mut App) {
+        app.handle_form_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+    }
 
     #[test]
     fn accepts_ctrl_s_as_form_submit_key() {
@@ -2931,6 +3276,63 @@ mod tests {
         apply_form_backspace(&mut value, &mut replace_on_input);
         assert!(value.is_empty());
         assert!(!replace_on_input);
+    }
+
+    #[test]
+    fn account_form_can_add_and_edit_after_typing_then_ctrl_s() {
+        let (_temp_dir, mut app) = test_app();
+        open_view(&mut app, View::Accounts);
+
+        app.open_form_for_current_view().unwrap();
+        form_text(&mut app, "Travel Fund");
+        app.handle_form_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        let created_index = app
+            .accounts
+            .iter()
+            .position(|account| account.name == "Travel Fund")
+            .unwrap();
+        app.account_index = created_index;
+
+        app.open_edit_form_for_current_view().unwrap();
+        form_text(&mut app, "Emergency Fund");
+        app.handle_form_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert!(app
+            .accounts
+            .iter()
+            .any(|account| account.name == "Emergency Fund"));
+    }
+
+    #[test]
+    fn category_form_can_add_and_edit_after_typing_then_enter() {
+        let (_temp_dir, mut app) = test_app();
+        open_view(&mut app, View::Categories);
+
+        app.open_form_for_current_view().unwrap();
+        form_text(&mut app, "Travel");
+        form_tab(&mut app);
+        app.handle_form_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        let created_index = app
+            .categories
+            .iter()
+            .position(|category| category.name == "Travel")
+            .unwrap();
+        app.category_index = created_index;
+
+        app.open_edit_form_for_current_view().unwrap();
+        form_text(&mut app, "Trips");
+        app.handle_form_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(app
+            .categories
+            .iter()
+            .any(|category| category.name == "Trips"));
     }
 
     #[test]

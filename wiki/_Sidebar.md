@@ -4,6 +4,7 @@
 - [Installation](Installation)
 - [Getting Started](Getting-Started)
 - [CLI Reference](CLI-Reference)
+- [Bank Import](Bank-Import)
 - [TUI and Shell](TUI-and-Shell)
 - [Planning and Forecasts](Planning-and-Forecasts)
 - [Data and Storage](Data-and-Storage)

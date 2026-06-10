@@ -92,6 +92,21 @@ impl TransactionKind {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ImportDefaultKind {
+    Income,
+    Expense,
+}
+
+impl From<ImportDefaultKind> for TransactionKind {
+    fn from(value: ImportDefaultKind) -> Self {
+        match value {
+            ImportDefaultKind::Income => Self::Income,
+            ImportDefaultKind::Expense => Self::Expense,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum ExportKind {
@@ -103,6 +118,7 @@ pub enum ExportKind {
 #[serde(rename_all = "snake_case")]
 pub enum ImportKind {
     Csv,
+    Camt053,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, ValueEnum)]
@@ -536,7 +552,7 @@ pub struct ImportedTransactionRow {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct CsvImportResult {
+pub struct ImportResult {
     pub dry_run: bool,
     pub imported_count: usize,
     pub duplicate_count: usize,
@@ -704,21 +720,156 @@ pub struct UpdateRecurringRule {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportColumn {
+    pub name: String,
+    pub aliases: Vec<String>,
+}
+
+impl ImportColumn {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            aliases: Vec::new(),
+        }
+    }
+
+    pub fn with_aliases(
+        name: impl Into<String>,
+        aliases: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            aliases: aliases.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CsvAmountStrategy {
+    Signed {
+        amount_column: ImportColumn,
+    },
+    Split {
+        debit_column: ImportColumn,
+        credit_column: ImportColumn,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CsvImportPlan {
     pub path: PathBuf,
     pub account: String,
-    pub date_column: String,
-    pub amount_column: String,
-    pub description_column: String,
-    pub category_column: Option<String>,
+    pub preset_id: Option<String>,
+    pub date_column: ImportColumn,
+    pub amount_strategy: CsvAmountStrategy,
+    pub description_column: ImportColumn,
+    pub category_column: Option<ImportColumn>,
     pub category: Option<String>,
-    pub payee_column: Option<String>,
-    pub note_column: Option<String>,
-    pub type_column: Option<String>,
+    pub income_category: Option<String>,
+    pub expense_category: Option<String>,
+    pub payee_column: Option<ImportColumn>,
+    pub note_column: Option<ImportColumn>,
+    pub type_column: Option<ImportColumn>,
     pub default_kind: Option<TransactionKind>,
     pub date_format: String,
     pub delimiter: u8,
     pub dry_run: bool,
     pub allow_duplicates: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Camt053ImportPlan {
+    pub path: PathBuf,
+    pub account: String,
+    pub income_category: Option<String>,
+    pub expense_category: Option<String>,
+    pub dry_run: bool,
+    pub allow_duplicates: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ImportPlan {
+    Csv(Box<CsvImportPlan>),
+    Camt053(Camt053ImportPlan),
+}
+
+impl ImportPlan {
+    pub fn account(&self) -> &str {
+        match self {
+            Self::Csv(plan) => &plan.account,
+            Self::Camt053(plan) => &plan.account,
+        }
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        match self {
+            Self::Csv(plan) => plan.path.as_path(),
+            Self::Camt053(plan) => plan.path.as_path(),
+        }
+    }
+
+    pub fn dry_run(&self) -> bool {
+        match self {
+            Self::Csv(plan) => plan.dry_run,
+            Self::Camt053(plan) => plan.dry_run,
+        }
+    }
+
+    pub fn allow_duplicates(&self) -> bool {
+        match self {
+            Self::Csv(plan) => plan.allow_duplicates,
+            Self::Camt053(plan) => plan.allow_duplicates,
+        }
+    }
+
+    pub fn set_dry_run(&mut self, dry_run: bool) {
+        match self {
+            Self::Csv(plan) => plan.dry_run = dry_run,
+            Self::Camt053(plan) => plan.dry_run = dry_run,
+        }
+    }
+
+    pub fn default_category_for_kind(&self, kind: TransactionKind) -> Option<&str> {
+        match self {
+            Self::Csv(plan) => match kind {
+                TransactionKind::Income => {
+                    plan.income_category.as_deref().or(plan.category.as_deref())
+                }
+                TransactionKind::Expense => plan
+                    .expense_category
+                    .as_deref()
+                    .or(plan.category.as_deref()),
+                TransactionKind::Transfer => None,
+            },
+            Self::Camt053(plan) => match kind {
+                TransactionKind::Income => plan.income_category.as_deref(),
+                TransactionKind::Expense => plan.expense_category.as_deref(),
+                TransactionKind::Transfer => None,
+            },
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportPresetVerification {
+    FirstParty,
+    Community,
+}
+
+impl ImportPresetVerification {
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            Self::FirstParty => "first-party",
+            Self::Community => "community",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ImportPresetSummary {
+    pub id: String,
+    pub label: String,
+    pub verification: ImportPresetVerification,
 }
 // SPDX-License-Identifier: AGPL-3.0-only

@@ -1,5 +1,6 @@
 /target/
 /dist/
+tmp_release_check/
 .tools/
 .wiki-publish/
 .env

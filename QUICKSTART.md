@@ -22,14 +22,31 @@ cargo run --release -- category add Salary --kind income
 cargo run --release -- category add Groceries --kind expense
 ```
 
-## 4. Enter Transactions
+## 4. Import a Statement
+
+Preset-based CSV imports are the fastest path for supported exports:
+
+```powershell
+cargo run --release -- import csv --list-presets
+cargo run --release -- import csv --input .\bank.csv --account Checking --preset revolut-csv --dry-run
+cargo run --release -- import csv --input .\bank.csv --account Checking --preset revolut-csv
+```
+
+Manual CSV mapping and limited `camt053` imports are also available:
+
+```powershell
+cargo run --release -- import csv --input .\bank.csv --account Checking --date-column Date --amount-column Amount --description-column Description --expense-category Groceries
+cargo run --release -- import camt053 --input .\statement.xml --account Checking --dry-run
+```
+
+## 5. Enter Transactions Manually
 
 ```powershell
 cargo run --release -- tx add --type income --amount 2500.00 --date 2026-03-01 --account Checking --category Salary --payee Employer
 cargo run --release -- tx add --type expense --amount 68.40 --date 2026-03-02 --account Checking --category Groceries --payee Supermarket
 ```
 
-## 5. Open the TUI
+## 6. Open the TUI
 
 ```powershell
 cargo run --release --
@@ -42,6 +59,7 @@ If you run the binary with no existing database, Helius can initialize the defau
 ```powershell
 cargo run --release -- balance
 cargo run --release -- tx list --limit 20
+cargo run --release -- import csv --list-presets
 cargo run --release -- summary month
 cargo run --release -- recurring list
 cargo run --release -- forecast show
