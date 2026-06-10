@@ -249,3 +249,13 @@ cargo build --release
 
 Copyright 2026 Kostas. This project is released under the GNU Affero General Public License v3.0.
 See [LICENSE](LICENSE).
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=Helius-Finance%2Fhelius-finance-tracker&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Helius-Finance/helius-finance-tracker&type=date&theme=dark&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Helius-Finance/helius-finance-tracker&type=date&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Helius-Finance/helius-finance-tracker&type=date&legend=bottom-right" />
+ </picture>
+</a>
