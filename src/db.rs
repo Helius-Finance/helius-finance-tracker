@@ -3430,10 +3430,6 @@ impl Db {
         let account_name = self.account_name(account_id)?;
         let rows = load_import_rows(plan, &self.currency_code()?)?;
 
-        // Wrap the entire import in a transaction so row-level failures leave
-        // the database untouched. For dry-run imports we always roll back, which
-        // also discards any category auto-creation side effects from
-        // ensure_import_category.
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
         let outcome = (|| -> Result<ImportResult, AppError> {
@@ -3525,8 +3521,6 @@ impl Db {
                 Ok(result)
             }
             Err(err) => {
-                // Best-effort rollback; surface the original error even if the
-                // rollback itself fails.
                 let _ = self.conn.execute_batch("ROLLBACK");
                 Err(err)
             }

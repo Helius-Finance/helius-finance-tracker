@@ -1,12 +1,3 @@
-//! Integration tests for [`helius::services::import::ImportService`].
-//!
-//! Mirrors the pattern established by `tests/services_accounts.rs`:
-//! exercise the service directly against a fresh on-disk SQLite
-//! database. These tests cover behaviour the CLI integration tests in
-//! `tests/cli.rs` cannot — namely the TUI-style two-step preview/commit
-//! flow that goes through `ImportService::preview` + `commit` rather
-//! than a single `helius import csv` invocation.
-
 use std::path::PathBuf;
 
 use helius::services::accounts::{AccountService, AddAccountRequest};
@@ -129,7 +120,6 @@ fn preview_alone_does_not_persist_rows() {
     let _preview = ImportService::new(&db)
         .preview(ImportRequest::Csv(Box::new(alpha_request(false))))
         .expect("preview");
-    // Drop the preview without calling commit.
     assert_eq!(count_transactions(&db), 0);
 }
 

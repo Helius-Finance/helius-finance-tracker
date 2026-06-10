@@ -1247,8 +1247,6 @@ impl App {
         setup: ImportSetupState,
         defaults: crate::importer::CsvMappingDefaults,
     ) -> FormState {
-        // Let step-1 income/expense overrides pre-populate the step-2 fields so
-        // the values the user typed in the source-select form are not lost.
         let income_default = setup
             .income_category
             .clone()
@@ -2884,10 +2882,6 @@ fn build_csv_import_request(
         default_kind: parse_optional_default_kind(optional_field(form, 12))?,
         date_format: optional_field(form, 13),
         delimiter: Some(delimiter),
-        // ImportService::preview always forces dry_run=true; the value here
-        // is irrelevant for the preview path. Set to false so any callers
-        // that go straight to ImportService::execute see committing semantics
-        // (matches the previous "real import" flow when dry_run was false).
         dry_run: false,
         allow_duplicates: setup.allow_duplicates,
     })

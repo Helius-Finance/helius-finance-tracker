@@ -1,16 +1,4 @@
-//! Snapshot tests for [`helius::AppError`] structured variant `Display` output.
-//!
-//! These tests are the regression gate for Phase 4 (structured errors).  They
-//! assert that every new typed variant produces a string that is byte-identical
-//! to what the previous string-carrying helpers (`invalid_ref`, `duplicate`,
-//! `AppError::Validation(format!(...))`) produced before the refactor.
-//!
-//! If a display string is ever changed for a good reason, update the expected
-//! literal here intentionally — that documents the decision.
-
 use helius::error::{AppError, EntityKind};
-
-// ── NotFoundEntity ────────────────────────────────────────────────────────────
 
 #[test]
 fn not_found_account() {
@@ -66,8 +54,6 @@ fn not_found_transaction() {
     assert_eq!(err.to_string(), "transaction `99` was not found");
 }
 
-// ── DuplicateEntity ───────────────────────────────────────────────────────────
-
 #[test]
 fn duplicate_account() {
     let err = AppError::duplicate(EntityKind::Account, "Savings");
@@ -97,10 +83,6 @@ fn duplicate_recurring_rule() {
     let err = AppError::duplicate(EntityKind::RecurringRule, "rent");
     assert_eq!(err.to_string(), "recurring rule `rent` already exists");
 }
-
-// ── FieldValidation ───────────────────────────────────────────────────────────
-// Each assertion mirrors a message that `amount.rs` previously produced as
-// `AppError::Validation("<field> <reason>".to_string())`.
 
 #[test]
 fn field_validation_amount_must_be_positive() {

@@ -1,10 +1,7 @@
-//! Budget service: wraps the budget-domain methods of [`crate::db::Db`].
-
 use crate::db::Db;
 use crate::error::AppError;
 use crate::model::{BudgetRecord, BudgetStatusRecord};
 
-/// Service facade for the budget domain.
 pub struct BudgetService<'a> {
     db: &'a Db,
 }
@@ -14,7 +11,6 @@ impl<'a> BudgetService<'a> {
         Self { db }
     }
 
-    /// Creates or replaces a budget entry. Returns the row id.
     pub fn set(
         &self,
         month: &str,
@@ -27,8 +23,6 @@ impl<'a> BudgetService<'a> {
             .set_budget(month, category, amount_cents, account, scenario)
     }
 
-    /// Deletes a budget entry for the given month / category / scenario
-    /// combination.
     pub fn delete(
         &self,
         month: &str,
@@ -38,7 +32,6 @@ impl<'a> BudgetService<'a> {
         self.db.delete_budget(month, category, scenario)
     }
 
-    /// Lists budget entries, optionally filtered by month and/or scenario.
     pub fn list(
         &self,
         month: Option<&str>,
@@ -47,7 +40,6 @@ impl<'a> BudgetService<'a> {
         self.db.list_budgets(month, scenario)
     }
 
-    /// Returns the spend-vs-budget status for the given month.
     pub fn status(
         &self,
         month: &str,

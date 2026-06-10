@@ -1905,7 +1905,6 @@ fn import_csv_lists_presets_with_stable_ids() {
 
 #[test]
 fn import_csv_lists_presets_without_initialized_db() {
-    // --list-presets is a pure-data lookup and must work before `helius init`.
     let temp_dir = TempDir::new().unwrap();
     let raw = run_ok(&temp_dir, &["import", "csv", "--list-presets", "--json"]);
     let presets: Value = serde_json::from_str(&raw).unwrap();

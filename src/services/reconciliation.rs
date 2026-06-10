@@ -1,11 +1,7 @@
-//! Reconciliation service: wraps the reconciliation-domain methods of
-//! [`crate::db::Db`].
-
 use crate::db::Db;
 use crate::error::AppError;
 use crate::model::ReconciliationRecord;
 
-/// Service facade for the reconciliation domain.
 pub struct ReconciliationService<'a> {
     db: &'a Db,
 }
@@ -15,7 +11,6 @@ impl<'a> ReconciliationService<'a> {
         Self { db }
     }
 
-    /// Creates a new reconciliation for an account. Returns the row id.
     pub fn start(
         &self,
         account: &str,
@@ -31,12 +26,10 @@ impl<'a> ReconciliationService<'a> {
         )
     }
 
-    /// Lists reconciliations, optionally filtered to a single account.
     pub fn list(&self, account: Option<&str>) -> Result<Vec<ReconciliationRecord>, AppError> {
         self.db.list_reconciliations(account)
     }
 
-    /// Removes a reconciliation by id.
     pub fn delete(&self, id: i64) -> Result<(), AppError> {
         self.db.delete_reconciliation(id)
     }

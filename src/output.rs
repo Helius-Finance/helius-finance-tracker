@@ -787,10 +787,12 @@ fn truncate_cell(text: &str, max_chars: usize) -> String {
     if char_count <= max_chars {
         return text.to_string();
     }
-    // Reserve space for the ellipsis so the cell does not exceed max_chars.
-    let keep = max_chars.saturating_sub(1);
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let keep = max_chars - 3;
     let truncated: String = text.chars().take(keep).collect();
-    format!("{truncated}…")
+    format!("{truncated}...")
 }
 
 fn money_text(amount_cents: i64) -> String {

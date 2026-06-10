@@ -10,8 +10,6 @@ mod shell;
 mod theme;
 mod ui;
 
-// Re-exports for integration tests and the future GUI crate. Everything here
-// is part of the stable API surface between frontends and the core.
 pub use crate::db::Db;
 pub use crate::model::{Account, AccountKind, TransactionFilters};
 

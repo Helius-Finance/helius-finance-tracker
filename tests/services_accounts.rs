@@ -1,15 +1,3 @@
-//! Integration tests for [`helius::services::accounts::AccountService`].
-//!
-//! These are the *first* non-CLI tests in the suite. Unlike `tests/cli.rs`
-//! which spawns the binary and asserts stdout, these exercise the service
-//! layer directly against a fresh on-disk SQLite database. Every future
-//! service test should follow the same pattern:
-//!
-//! 1. `fresh_db()` to get a clean database + tempdir (dropping the tempdir
-//!    keeps the file alive for the test's lifetime).
-//! 2. Construct the service with `ServiceType::new(&db)`.
-//! 3. Call typed request structs, assert on typed response / `AppError`.
-
 use helius::services::accounts::{
     AccountService, AddAccountRequest, DeleteAccountRequest, EditAccountRequest,
     ListAccountsRequest,
@@ -22,8 +10,6 @@ fn fresh_db() -> (TempDir, Db) {
     let path = temp_dir.path().join("tracker.db");
     let db = Db::open_for_init(&path).expect("open_for_init");
     db.init("EUR").expect("init");
-    // Reopen in read/write mode, mirroring how the CLI paths use the DB
-    // after initialization.
     drop(db);
     let db = Db::open_existing(&path).expect("open_existing");
     (temp_dir, db)
@@ -51,7 +37,6 @@ fn add_and_list_accounts_roundtrip() {
 
     let accounts = service.list(ListAccountsRequest).expect("list");
     let names: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
-    // Ordering is case-insensitive by name; the service preserves Db ordering.
     assert_eq!(names, vec!["Checking", "Savings", "Wallet"]);
     assert_eq!(accounts[0].kind, AccountKind::Checking);
     assert_eq!(accounts[2].kind, AccountKind::Cash);

@@ -214,10 +214,6 @@ const REVOLUT_CSV: CsvImportPreset = CsvImportPreset {
     verification: ImportPresetVerification::FirstParty,
 };
 
-// --- Community presets -------------------------------------------------------
-// These presets have fixture coverage in this repository, but bank export
-// layouts can vary by region, account type, and product version.
-
 const N26_EU: CsvImportPreset = CsvImportPreset {
     id: "n26",
     label: "N26 Bank (EU) CSV",
@@ -309,9 +305,6 @@ const DKB_DE: CsvImportPreset = CsvImportPreset {
         &["Auftraggeber / Empf\u{00e4}nger", "Empf\u{00e4}nger"],
     )),
     note_column: Some(PresetColumn::new("Verwendungszweck", &["Buchungstext"])),
-    // Intentionally no type_column: German export values (Ausgang/Eingang) do
-    // not map to the parser's known transaction-type keywords. Rely on the
-    // signed amount for income/expense classification instead.
     type_column: None,
     default_kind: None,
     verification: ImportPresetVerification::Community,
@@ -328,19 +321,12 @@ const COMMERZBANK_DE: CsvImportPreset = CsvImportPreset {
     },
     description_column: PresetColumn::new("Buchungstext", &["Verwendungszweck"]),
     category_column: None,
-    // Commerzbank exports vary in how they name the counterparty column (some
-    // templates omit it altogether), so leave payee empty by default and let
-    // users add --payee-column manually if their export contains one.
     payee_column: None,
     note_column: Some(PresetColumn::new("Buchungstext", &["Verwendungszweck"])),
-    // See DKB note above: German Umsatzart values (Kartenzahlung / Lohn...)
-    // do not parse. Rely on the signed Betrag instead.
     type_column: None,
     default_kind: None,
     verification: ImportPresetVerification::Community,
 };
-
-// --- United States -----------------------------------------------------------
 
 const CHASE_US: CsvImportPreset = CsvImportPreset {
     id: "chase-us",
@@ -415,8 +401,6 @@ const CITI_US: CsvImportPreset = CsvImportPreset {
     verification: ImportPresetVerification::Community,
 };
 
-// --- United Kingdom (high-street) --------------------------------------------
-
 const BARCLAYS_UK: CsvImportPreset = CsvImportPreset {
     id: "barclays-uk",
     label: "Barclays (UK) CSV",
@@ -490,8 +474,6 @@ const NATWEST_UK: CsvImportPreset = CsvImportPreset {
     default_kind: None,
     verification: ImportPresetVerification::Community,
 };
-
-// --- Continental Europe ------------------------------------------------------
 
 const ING_NL: CsvImportPreset = CsvImportPreset {
     id: "ing-nl",
@@ -589,8 +571,6 @@ const INTESA_SANPAOLO_IT: CsvImportPreset = CsvImportPreset {
     default_kind: None,
     verification: ImportPresetVerification::Community,
 };
-
-// --- Asia-Pacific ------------------------------------------------------------
 
 const COMMBANK_AU: CsvImportPreset = CsvImportPreset {
     id: "commbank-au",
