@@ -894,6 +894,7 @@ impl App {
         crate::services::budgets::BudgetService::new(&self.db).delete(
             &row.month,
             &row.category_name,
+            row.account_name.as_deref().filter(|name| !name.is_empty()),
             row.scenario_name.as_deref().filter(|_| row.is_override),
         )?;
         self.refresh()?;

@@ -405,6 +405,8 @@ pub struct BudgetDeleteArgs {
     #[arg(long)]
     pub month: String,
     #[arg(long)]
+    pub account: Option<String>,
+    #[arg(long)]
     pub scenario: Option<String>,
 }
 

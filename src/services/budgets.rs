@@ -27,9 +27,11 @@ impl<'a> BudgetService<'a> {
         &self,
         month: &str,
         category: &str,
+        account: Option<&str>,
         scenario: Option<&str>,
     ) -> Result<(), AppError> {
-        self.db.delete_budget(month, category, scenario)
+        self.db
+            .delete_budget(month, category, account, scenario)
     }
 
     pub fn list(

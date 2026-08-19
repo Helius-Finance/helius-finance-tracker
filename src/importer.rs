@@ -818,6 +818,24 @@ pub fn parse_import_amount_to_cents(value: &str) -> Result<i64, AppError> {
         cleaned = rest.to_string();
     } else if let Some(rest) = cleaned.strip_prefix('+') {
         cleaned = rest.to_string();
+    } else if cleaned.ends_with('-') {
+        negative = true;
+        cleaned = cleaned[..cleaned.len() - 1].to_string();
+    } else if cleaned[1..].contains('-') {
+        // `$-120.00` is a sign after the symbol; `12-34` is malformed.
+        let mut chars = cleaned.chars();
+        let first = chars.next().unwrap_or_default();
+        if matches!(first, '$' | '\u{20ac}') && chars.next() == Some('-') {
+            negative = true;
+            cleaned = cleaned[2..].to_string();
+        } else {
+            return Err(AppError::Validation(format!(
+                "unsupported import amount `{value}`"
+            )));
+        }
+    }
+    if cleaned.starts_with('$') || cleaned.starts_with('\u{20ac}') {
+        cleaned = cleaned[1..].to_string();
     }
 
     let cleaned: String = cleaned
@@ -826,6 +844,14 @@ pub fn parse_import_amount_to_cents(value: &str) -> Result<i64, AppError> {
         .collect();
     let cleaned = cleaned.replace('\'', "");
     if cleaned.is_empty() {
+        return Err(AppError::Validation(format!(
+            "unsupported import amount `{value}`"
+        )));
+    }
+    if raw
+        .chars()
+        .any(|ch| !(ch.is_ascii_digit() || matches!(ch, '.' | ',' | '\'' | '-' | '+' | '(' | ')' | '$' | '\u{20ac}' | ' ' | '\u{a0}')))
+    {
         return Err(AppError::Validation(format!(
             "unsupported import amount `{value}`"
         )));
@@ -1749,6 +1775,18 @@ mod tests {
         assert_eq!(parse_import_amount_to_cents("-15,25").unwrap(), -1525);
         assert_eq!(parse_import_amount_to_cents("1.234,56").unwrap(), 123456);
         assert_eq!(parse_import_amount_to_cents("1,234.56").unwrap(), 123456);
+    }
+
+    #[test]
+    fn import_amount_parser_handles_sign_positions_and_rejects_markers() {
+        assert_eq!(parse_import_amount_to_cents("$1,234.56").unwrap(), 123456);
+        assert_eq!(parse_import_amount_to_cents("-$50.00").unwrap(), -5000);
+        assert_eq!(parse_import_amount_to_cents("(25.00)").unwrap(), -2500);
+        assert_eq!(parse_import_amount_to_cents("100.00-").unwrap(), -10000);
+        assert_eq!(parse_import_amount_to_cents("$-50.00").unwrap(), -5000);
+        assert!(parse_import_amount_to_cents("100.00 CR").is_err());
+        assert!(parse_import_amount_to_cents("DR 100.00").is_err());
+        assert!(parse_import_amount_to_cents("12-34").is_err());
     }
 
     #[test]

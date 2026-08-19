@@ -732,11 +732,18 @@ fn handle_budget(db: Db, command: BudgetCommand, stdout: &mut dyn Write) -> Resu
         BudgetCommand::Delete(BudgetDeleteArgs {
             category,
             month,
+            account,
             scenario,
         }) => {
             let month = normalize_month(&month)?;
+            let account = normalize_optional_string(account);
             let scenario = normalize_optional_string(scenario);
-            service.delete(&month, &category, scenario.as_deref())?;
+            service.delete(
+                &month,
+                &category,
+                account.as_deref(),
+                scenario.as_deref(),
+            )?;
             let message = match scenario {
                 Some(name) => format!("Reset scenario budget for {category} in {month} ({name})."),
                 None => format!("Deleted budget for {category} in {month}."),

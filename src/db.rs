@@ -21,7 +21,7 @@ use crate::model::{
     UpdatePlanningScenario, UpdateRecurringRule, UpdateTransaction, Weekday, WeeklyBalancePoint,
 };
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 pub struct Db {
     conn: Connection,
@@ -186,8 +186,8 @@ impl Db {
 
         // Recreate missing schema objects before versioned migrations.
         db.conn.execute_batch(FULL_SCHEMA_SQL)?;
-        db.migrate_if_needed()?;
         db.repair_schema_if_needed()?;
+        db.migrate_if_needed()?;
         db.ensure_indexes()?;
         Ok(db)
     }
@@ -1430,8 +1430,9 @@ impl Db {
                          FROM scenario_budget_overrides
                          WHERE scenario_id = ?1
                            AND month = ?2
-                           AND category_id = ?3",
-                        params![scenario_id, &month, category_id],
+                           AND category_id = ?3
+                           AND (?4 IS NULL AND account_id IS NULL OR account_id = ?4)",
+                        params![scenario_id, &month, category_id, account_id],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .optional()?;
@@ -1441,15 +1442,36 @@ impl Db {
                         "SELECT account_id
                          FROM budgets
                          WHERE month = ?1
-                           AND category_id = ?2",
+                           AND category_id = ?2
+                         ORDER BY account_id IS NULL, account_id
+                         LIMIT 1",
                         params![&month, category_id],
                         |row| row.get(0),
                     )
                     .optional()?
                     .flatten();
 
-                match existing {
-                    Some((id, current_account_id)) => {
+                // No account: match any row (unscoped first) and update in place.
+                let target = match (account_id, existing) {
+                    (None, None) => self
+                        .conn
+                        .query_row(
+                            "SELECT id, account_id
+                             FROM scenario_budget_overrides
+                             WHERE scenario_id = ?1
+                               AND month = ?2
+                               AND category_id = ?3
+                             ORDER BY account_id IS NULL, account_id
+                             LIMIT 1",
+                            params![scenario_id, &month, category_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?,
+                    (_, found) => found,
+                };
+
+                match target {
+                    Some((id, _current_account_id)) => {
                         self.conn.execute(
                             "UPDATE scenario_budget_overrides
                              SET amount_cents = ?1,
@@ -1458,7 +1480,7 @@ impl Db {
                              WHERE id = ?4",
                             params![
                                 amount_cents,
-                                account_id.or(current_account_id),
+                                account_id,
                                 timestamp,
                                 id
                             ],
@@ -1494,14 +1516,32 @@ impl Db {
                 let existing: Option<(i64, Option<i64>)> = self
                     .conn
                     .query_row(
-                        "SELECT id, account_id FROM budgets WHERE month = ?1 AND category_id = ?2",
-                        params![&month, category_id],
+                        "SELECT id, account_id FROM budgets
+                         WHERE month = ?1 AND category_id = ?2
+                           AND (?3 IS NULL AND account_id IS NULL OR account_id = ?3)",
+                        params![&month, category_id, account_id],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .optional()?;
 
-                match existing {
-                    Some((id, current_account_id)) => {
+                // No account: fall back to whatever row exists and update it.
+                let target = match (account_id, existing) {
+                    (None, None) => self
+                        .conn
+                        .query_row(
+                            "SELECT id, account_id FROM budgets
+                             WHERE month = ?1 AND category_id = ?2
+                             ORDER BY account_id IS NULL, account_id
+                             LIMIT 1",
+                            params![&month, category_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?,
+                    (_, found) => found,
+                };
+
+                match target {
+                    Some((id, _current_account_id)) => {
                         self.conn.execute(
                             "UPDATE budgets
                              SET amount_cents = ?1,
@@ -1510,7 +1550,7 @@ impl Db {
                              WHERE id = ?4",
                             params![
                                 amount_cents,
-                                account_id.or(current_account_id),
+                                account_id,
                                 timestamp,
                                 id
                             ],
@@ -1547,24 +1587,31 @@ impl Db {
         &self,
         month: &str,
         category_ref: &str,
+        account_ref: Option<&str>,
         scenario_ref: Option<&str>,
     ) -> Result<(), AppError> {
         let month = normalize_month_key(month)?;
         let category_id = self.resolve_category_ref(category_ref, Some(&CategoryKind::Expense))?;
         let scenario_id = self.resolve_optional_scenario_ref(scenario_ref)?;
+        let account_id = match account_ref.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(reference) => Some(self.resolve_account_ref(reference)?),
+            None => None,
+        };
         let changed = match scenario_id {
             Some(scenario_id) => self.conn.execute(
                 "DELETE FROM scenario_budget_overrides
                  WHERE scenario_id = ?1
                    AND month = ?2
-                   AND category_id = ?3",
-                params![scenario_id, &month, category_id],
+                   AND category_id = ?3
+                   AND (?4 IS NULL AND account_id IS NULL OR account_id = ?4)",
+                params![scenario_id, &month, category_id, account_id],
             )?,
             None => self.conn.execute(
                 "DELETE FROM budgets
                  WHERE month = ?1
-                   AND category_id = ?2",
-                params![&month, category_id],
+                   AND category_id = ?2
+                   AND (?3 IS NULL AND account_id IS NULL OR account_id = ?3)",
+                params![&month, category_id, account_id],
             )?,
         };
 
@@ -1605,7 +1652,7 @@ impl Db {
             Some(id) => Some(self.scenario_name(id)?),
             None => None,
         };
-        let mut rows_by_key: BTreeMap<(String, i64), BudgetRecord> = BTreeMap::new();
+        let mut rows_by_key: BTreeMap<(String, i64, Option<i64>), BudgetRecord> = BTreeMap::new();
         let mut statement = self.conn.prepare(
             "SELECT
                 b.id,
@@ -1642,7 +1689,7 @@ impl Db {
         })?;
         for row in rows {
             let row = row?;
-            rows_by_key.insert((row.month.clone(), row.category_id), row);
+            rows_by_key.insert((row.month.clone(), row.category_id, row.account_id), row);
         }
 
         if let Some(scenario_id) = scenario_id {
@@ -1686,7 +1733,7 @@ impl Db {
             )?;
             for row in override_rows {
                 let row = row?;
-                rows_by_key.insert((row.month.clone(), row.category_id), row);
+                rows_by_key.insert((row.month.clone(), row.category_id, row.account_id), row);
             }
         }
 
@@ -1713,7 +1760,7 @@ impl Db {
             None => None,
         };
         let (from, to) = month_bounds(&month)?;
-        let mut rows_by_category: BTreeMap<i64, BudgetStatusRecord> = BTreeMap::new();
+        let mut rows_by_category: BTreeMap<(i64, Option<i64>), BudgetStatusRecord> = BTreeMap::new();
 
         let mut budget_statement = self.conn.prepare(
             "SELECT
@@ -1740,7 +1787,7 @@ impl Db {
         for row in budget_rows {
             let (category_id, category_name, account_id, account_name, budget_cents) = row?;
             rows_by_category.insert(
-                category_id,
+                (category_id, account_id),
                 BudgetStatusRecord {
                     month: month.clone(),
                     category_id,
@@ -1786,7 +1833,7 @@ impl Db {
             for row in override_rows {
                 let (category_id, category_name, account_id, account_name, budget_cents) = row?;
                 rows_by_category.insert(
-                    category_id,
+                    (category_id, account_id),
                     BudgetStatusRecord {
                         month: month.clone(),
                         category_id,
@@ -1831,27 +1878,30 @@ impl Db {
         })?;
         for row in spend_rows {
             let (category_id, spend_account_id, category_name, spent_cents) = row?;
-            let entry = rows_by_category
-                .entry(category_id)
-                .or_insert_with(|| BudgetStatusRecord {
-                    month: month.clone(),
-                    category_id,
-                    category_name,
-                    scenario_id,
-                    scenario_name: scenario_name.clone(),
-                    is_override: false,
-                    account_id: None,
-                    account_name: None,
-                    budget_cents: 0,
-                    spent_cents: 0,
-                    remaining_cents: 0,
-                    over_budget: false,
-                });
-            if let Some(mapped_account_id) = entry.account_id {
-                if mapped_account_id != spend_account_id {
-                    continue;
-                }
-            }
+            let entry = if let Some(entry) =
+                rows_by_category.get_mut(&(category_id, Some(spend_account_id)))
+            {
+                entry
+            } else if let Some(entry) = rows_by_category.get_mut(&(category_id, None)) {
+                entry
+            } else {
+                rows_by_category
+                    .entry((category_id, Some(spend_account_id)))
+                    .or_insert_with(|| BudgetStatusRecord {
+                        month: month.clone(),
+                        category_id,
+                        category_name,
+                        scenario_id,
+                        scenario_name: scenario_name.clone(),
+                        is_override: false,
+                        account_id: Some(spend_account_id),
+                        account_name: None,
+                        budget_cents: 0,
+                        spent_cents: 0,
+                        remaining_cents: 0,
+                        over_budget: false,
+                    })
+            };
             entry.spent_cents += spent_cents;
             entry.remaining_cents = entry.budget_cents - entry.spent_cents;
             entry.over_budget = entry.budget_cents > 0 && entry.spent_cents > entry.budget_cents;
@@ -3198,7 +3248,7 @@ impl Db {
     ) -> Result<(Vec<BudgetForecastRow>, Vec<String>), AppError> {
         let start_month = start.format("%Y-%m").to_string();
         let end_month = end.format("%Y-%m").to_string();
-        let mut rows_by_key: BTreeMap<(String, i64), BudgetForecastRow> = BTreeMap::new();
+        let mut rows_by_key: BTreeMap<(String, i64, Option<i64>), BudgetForecastRow> = BTreeMap::new();
 
         let mut baseline_statement = self.conn.prepare(
             "SELECT
@@ -3227,7 +3277,7 @@ impl Db {
             })?;
         for row in baseline_rows {
             let row = row?;
-            rows_by_key.insert((row.month.clone(), row.category_id), row);
+            rows_by_key.insert((row.month.clone(), row.category_id, row.account_id), row);
         }
 
         if let Some(scenario_id) = scenario_id {
@@ -3261,7 +3311,7 @@ impl Db {
             )?;
             for row in override_rows {
                 let row = row?;
-                rows_by_key.insert((row.month.clone(), row.category_id), row);
+                rows_by_key.insert((row.month.clone(), row.category_id, row.account_id), row);
             }
         }
 
@@ -3786,6 +3836,9 @@ impl Db {
         if self.schema_version()? < 8 {
             self.migrate_v7_to_v8()?;
         }
+        if self.schema_version()? < 9 {
+            self.migrate_v8_to_v9()?;
+        }
         Ok(())
     }
 
@@ -4053,6 +4106,65 @@ impl Db {
         Ok(())
     }
 
+    fn migrate_v8_to_v9(&mut self) -> Result<(), AppError> {
+        let needs_budget_account = {
+            let mut statement = self.conn.prepare("PRAGMA table_info(budgets)")?;
+            let has_column = statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|column| column.eq_ignore_ascii_case("account_id"));
+            !has_column
+        };
+        self.conn.execute_batch("BEGIN;")?;
+        if needs_budget_account {
+            self.conn.execute_batch(
+                "ALTER TABLE budgets ADD COLUMN account_id INTEGER REFERENCES accounts(id);",
+            )?;
+        }
+        self.conn.execute_batch(
+            "ALTER TABLE budgets RENAME TO budgets_v8;
+             CREATE TABLE budgets (
+                 id INTEGER PRIMARY KEY,
+                 month TEXT NOT NULL,
+                 category_id INTEGER NOT NULL REFERENCES categories(id),
+                 account_id INTEGER REFERENCES accounts(id),
+                 amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 UNIQUE(month, category_id, account_id)
+             );
+             INSERT INTO budgets (id, month, category_id, account_id, amount_cents, created_at, updated_at)
+             SELECT id, month, category_id, account_id, amount_cents, created_at, updated_at
+             FROM budgets_v8;
+             DROP TABLE budgets_v8;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_budgets_unscoped_unique
+                 ON budgets(month, category_id) WHERE account_id IS NULL;
+             ALTER TABLE scenario_budget_overrides RENAME TO scenario_budget_overrides_v8;
+             CREATE TABLE scenario_budget_overrides (
+                 id INTEGER PRIMARY KEY,
+                 scenario_id INTEGER NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                 month TEXT NOT NULL,
+                 category_id INTEGER NOT NULL REFERENCES categories(id),
+                 amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+                 account_id INTEGER REFERENCES accounts(id),
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 UNIQUE(scenario_id, month, category_id, account_id)
+             );
+             INSERT INTO scenario_budget_overrides (id, scenario_id, month, category_id, amount_cents, account_id, created_at, updated_at)
+             SELECT id, scenario_id, month, category_id, amount_cents, account_id, created_at, updated_at
+             FROM scenario_budget_overrides_v8;
+             DROP TABLE scenario_budget_overrides_v8;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_scenario_budget_overrides_unscoped_unique
+                 ON scenario_budget_overrides(scenario_id, month, category_id) WHERE account_id IS NULL;
+             UPDATE metadata SET schema_version = 9 WHERE id = 1;
+             COMMIT;",
+        )?;
+        self.ensure_indexes()?;
+        Ok(())
+    }
+
     fn ensure_indexes(&self) -> Result<(), AppError> {
         self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(txn_date);
@@ -4066,11 +4178,15 @@ impl Db {
              CREATE INDEX IF NOT EXISTS idx_recurring_occurrences_due_status ON recurring_occurrences(due_on, status);
              CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);
              CREATE INDEX IF NOT EXISTS idx_budgets_account ON budgets(account_id);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_budgets_unscoped_unique
+                 ON budgets(month, category_id) WHERE account_id IS NULL;
              CREATE INDEX IF NOT EXISTS idx_planning_items_due ON planning_items(due_on);
              CREATE INDEX IF NOT EXISTS idx_planning_items_scenario_due ON planning_items(scenario_id, due_on);
              CREATE INDEX IF NOT EXISTS idx_planning_goals_account ON planning_goals(account_id);
              CREATE INDEX IF NOT EXISTS idx_planning_scenarios_name ON planning_scenarios(name);
-             CREATE INDEX IF NOT EXISTS idx_scenario_budget_overrides_lookup ON scenario_budget_overrides(scenario_id, month, category_id);",
+             CREATE INDEX IF NOT EXISTS idx_scenario_budget_overrides_lookup ON scenario_budget_overrides(scenario_id, month, category_id);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_scenario_budget_overrides_unscoped_unique
+                 ON scenario_budget_overrides(scenario_id, month, category_id) WHERE account_id IS NULL;",
         )?;
         Ok(())
     }
@@ -4949,7 +5065,7 @@ CREATE TABLE IF NOT EXISTS budgets (
     amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(month, category_id)
+    UNIQUE(month, category_id, account_id)
 );
 
 CREATE TABLE IF NOT EXISTS planning_scenarios (
@@ -4993,7 +5109,7 @@ CREATE TABLE IF NOT EXISTS scenario_budget_overrides (
     account_id INTEGER REFERENCES accounts(id),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(scenario_id, month, category_id)
+    UNIQUE(scenario_id, month, category_id, account_id)
 );
 
 CREATE TABLE IF NOT EXISTS planning_goals (

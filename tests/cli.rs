@@ -841,7 +841,15 @@ fn budget_delete_removes_baseline_budget_entry() {
     );
     run_ok(
         &temp_dir,
-        &["budget", "delete", "Groceries", "--month", "2026-02"],
+        &[
+            "budget",
+            "delete",
+            "Groceries",
+            "--month",
+            "2026-02",
+            "--account",
+            "Checking",
+        ],
     );
 
     let budgets: Value = serde_json::from_str(&run_ok(
@@ -894,7 +902,7 @@ fn planning_schema_migration_from_v7_to_v8_recreates_planning_tables() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     assert_eq!(planning_items_exists, 1);
     assert_eq!(planning_goals_exists, 1);
 }
@@ -1370,6 +1378,8 @@ fn scenario_budget_overrides_change_budget_views_and_forecast() {
             "Groceries",
             "--month",
             current_month.as_str(),
+            "--account",
+            "Checking",
             "--scenario",
             "Stress",
         ],
@@ -2138,6 +2148,314 @@ fn uncategorized_fallback_categories_are_created_and_restored() {
         .unwrap()
         .iter()
         .any(|row| row["name"] == "Uncategorized Expense"));
+}
+
+#[test]
+fn budget_set_second_account_creates_second_budget_row() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+
+    run_ok(
+        &temp_dir,
+        &[
+            "budget",
+            "set",
+            "Groceries",
+            "--month",
+            "2026-02",
+            "--amount",
+            "500.00",
+            "--account",
+            "Checking",
+        ],
+    );
+    run_ok(
+        &temp_dir,
+        &[
+            "budget",
+            "set",
+            "Groceries",
+            "--month",
+            "2026-02",
+            "--amount",
+            "200.00",
+            "--account",
+            "Cash",
+        ],
+    );
+
+    let budgets: Value = serde_json::from_str(&run_ok(
+        &temp_dir,
+        &["budget", "list", "--month", "2026-02", "--json"],
+    ))
+    .unwrap();
+    let rows = budgets.as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "per-account budgets must coexist, got {rows:?}"
+    );
+    assert!(rows.iter().any(|row| row["account_name"] == "Checking"));
+    assert!(rows.iter().any(|row| row["account_name"] == "Cash"));
+}
+
+#[test]
+fn budget_status_shows_one_row_per_account_with_matching_spend() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+
+    run_ok(
+        &temp_dir,
+        &[
+            "budget",
+            "set",
+            "Groceries",
+            "--month",
+            "2026-02",
+            "--amount",
+            "500.00",
+            "--account",
+            "Checking",
+        ],
+    );
+    run_ok(
+        &temp_dir,
+        &[
+            "budget",
+            "set",
+            "Groceries",
+            "--month",
+            "2026-02",
+            "--amount",
+            "200.00",
+            "--account",
+            "Cash",
+        ],
+    );
+
+    let status: Value = serde_json::from_str(&run_ok(
+        &temp_dir,
+        &["budget", "status", "2026-02", "--json"],
+    ))
+    .unwrap();
+    let rows = status.as_array().unwrap();
+    let checking = rows
+        .iter()
+        .find(|row| row["account_name"] == "Checking")
+        .expect("Checking budget row");
+    let cash = rows
+        .iter()
+        .find(|row| row["account_name"] == "Cash")
+        .expect("Cash budget row");
+    assert_eq!(checking["budget_cents"], 50000);
+    assert_eq!(checking["spent_cents"], 12540, "Checking spend only");
+    assert_eq!(cash["budget_cents"], 20000);
+    assert_eq!(cash["spent_cents"], 0, "Cash has no Groceries spend");
+}
+
+#[test]
+fn budget_set_without_account_clears_account_scope() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+
+    run_ok(
+        &temp_dir,
+        &[
+            "budget",
+            "set",
+            "Groceries",
+            "--month",
+            "2026-02",
+            "--amount",
+            "300.00",
+            "--account",
+            "Checking",
+        ],
+    );
+    run_ok(
+        &temp_dir,
+        &[
+            "budget",
+            "set",
+            "Groceries",
+            "--month",
+            "2026-02",
+            "--amount",
+            "300.00",
+        ],
+    );
+
+    let budgets: Value = serde_json::from_str(&run_ok(
+        &temp_dir,
+        &["budget", "list", "--month", "2026-02", "--json"],
+    ))
+    .unwrap();
+    let rows = budgets.as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "clearing the scope must update in place, got {rows:?}"
+    );
+    let row = rows.first().unwrap();
+    assert!(
+        row["account_name"].is_null(),
+        "no --account must clear the scope, got {row:?}"
+    );
+
+    let status: Value = serde_json::from_str(&run_ok(
+        &temp_dir,
+        &["budget", "status", "2026-02", "--json"],
+    ))
+    .unwrap();
+    let groceries = status
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["category_name"] == "Groceries")
+        .unwrap();
+    assert_eq!(
+        groceries["spent_cents"], 12540,
+        "all-account budget must count spend on every account"
+    );
+}
+
+#[test]
+fn budget_set_scenario_override_without_account_clears_scope_in_place() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+
+    run_ok(
+        &temp_dir,
+        &[
+            "budget",
+            "set",
+            "Groceries",
+            "--month",
+            "2026-02",
+            "--amount",
+            "300.00",
+            "--account",
+            "Checking",
+        ],
+    );
+    run_ok(&temp_dir, &["scenario", "add", "Stress"]);
+    run_ok(
+        &temp_dir,
+        &[
+            "budget",
+            "set",
+            "Groceries",
+            "--month",
+            "2026-02",
+            "--amount",
+            "500.00",
+            "--account",
+            "Checking",
+            "--scenario",
+            "Stress",
+        ],
+    );
+    run_ok(
+        &temp_dir,
+        &[
+            "budget",
+            "set",
+            "Groceries",
+            "--month",
+            "2026-02",
+            "--amount",
+            "600.00",
+            "--scenario",
+            "Stress",
+        ],
+    );
+
+    let budgets: Value = serde_json::from_str(&run_ok(
+        &temp_dir,
+        &[
+            "budget",
+            "list",
+            "--month",
+            "2026-02",
+            "--scenario",
+            "Stress",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    let rows = budgets.as_array().unwrap();
+    let override_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row["is_override"] == true)
+        .collect();
+    assert_eq!(
+        override_rows.len(),
+        1,
+        "scenario override must clear in place, got {rows:?}"
+    );
+    let row = override_rows.first().unwrap();
+    assert_eq!(row["amount_cents"], 60000);
+    assert!(
+        row["account_name"].is_null(),
+        "override without account must be all-accounts, got {row:?}"
+    );
+}
+
+#[test]
+fn csv_import_preserves_sign_for_trailing_and_symbol_after_minus_amounts() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+
+    let csv_path = temp_dir.path().join("signed-amounts.csv");
+    fs::write(
+        &csv_path,
+        "date,description,amount\n\
+         2026-08-01,Salary,3000.00\n\
+         2026-08-02,Rent trailing minus,1500.00-\n\
+         2026-08-03,Groceries sign after symbol,$-120.00\n",
+    )
+    .unwrap();
+
+    let imported: Value = serde_json::from_str(&run_ok(
+        &temp_dir,
+        &[
+            "import",
+            "csv",
+            "--input",
+            csv_path.to_str().unwrap(),
+            "--account",
+            "Checking",
+            "--date-column",
+            "date",
+            "--amount-column",
+            "amount",
+            "--description-column",
+            "description",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(imported["imported_count"], 3);
+
+    let transactions = transaction_map(&temp_dir);
+    let by_payee = |name: &str| {
+        transactions
+            .iter()
+            .find(|row| row["payee"] == name)
+            .unwrap_or_else(|| panic!("missing transaction with payee {name}"))
+    };
+    let salary = by_payee("Salary");
+    assert_eq!(salary["kind"], "income");
+    assert_eq!(salary["amount_cents"], 300000);
+    let rent = by_payee("Rent trailing minus");
+    assert_eq!(rent["kind"], "expense", "trailing minus is a debit");
+    assert_eq!(rent["amount_cents"], 150000);
+    let groceries = by_payee("Groceries sign after symbol");
+    assert_eq!(
+        groceries["kind"], "expense",
+        "sign after symbol is a debit"
+    );
+    assert_eq!(groceries["amount_cents"], 12000);
 }
 
 #[test]
