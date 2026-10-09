@@ -18,6 +18,7 @@ Forecast options:
 - `--account <name>` narrows the forecast to one account
 - `forecast show` defaults to 90 days
 - `forecast bills` defaults to 30 days
+- `--days` accepts 1 to 365
 
 ## Scenarios
 

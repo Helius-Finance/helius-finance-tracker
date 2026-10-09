@@ -131,7 +131,7 @@ the importer either surfaces a clear error or skips the row — double-check
 the preview before confirming.
 
 - **Booked entries only.** `Sts != BOOK` (pending, reversal, information-only)
-  entries are skipped.
+  entries are skipped. A statement with no booked entries at all is rejected.
 - **No transfer detection.** `CdtDbtInd=CRDT` maps to income, `DBIT` to
   expense. Internal transfers between two of your own accounts must be
   reconciled manually after import.

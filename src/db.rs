@@ -3,9 +3,11 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{Datelike, Duration, Local, NaiveDate, Weekday as ChronoWeekday};
+use chrono::{Datelike, Days, Duration, Local, NaiveDate, Weekday as ChronoWeekday};
 use directories::ProjectDirs;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 
 use crate::error::{AppError, EntityKind};
 use crate::importer::load_import_rows;
@@ -205,11 +207,25 @@ impl Db {
 
     fn open(path: &Path, flags: OpenFlags) -> Result<Self, AppError> {
         let conn = Connection::open_with_flags(path, flags)?;
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = FULL;
+             PRAGMA temp_store = MEMORY;",
+        )?;
         Ok(Self {
             conn,
             path: path.to_path_buf(),
         })
+    }
+
+    // Dropping the returned transaction without calling commit() rolls it back.
+    fn begin_write(&self) -> Result<Transaction<'_>, AppError> {
+        Ok(Transaction::new_unchecked(
+            &self.conn,
+            TransactionBehavior::Immediate,
+        )?)
     }
 
     pub fn init(&self, currency: &str) -> Result<(), AppError> {
@@ -580,6 +596,7 @@ impl Db {
         &self,
         filters: &TransactionFilters,
     ) -> Result<Vec<TransactionRecord>, AppError> {
+        validate_date_range(filters.from.as_deref(), filters.to.as_deref(), "tx list")?;
         let account_id = match filters.account.as_deref() {
             Some(reference) => Some(self.resolve_account_ref(reference)?),
             None => None,
@@ -593,8 +610,20 @@ impl Db {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(|value| format!("%{}%", value.to_lowercase()));
-        let limit = filters.limit.unwrap_or(1_000_000) as i64;
+            .map(|value| {
+                let escaped = value
+                    .to_lowercase()
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_");
+                format!("%{escaped}%")
+            });
+        if filters.limit == Some(0) {
+            return Err(AppError::Validation(
+                "tx list limit must be a whole positive number".to_string(),
+            ));
+        }
+        let limit = filters.limit.unwrap_or(1_000_000).min(1_000_000) as i64;
         let include_deleted = if filters.include_deleted {
             1_i64
         } else {
@@ -630,11 +659,11 @@ impl Db {
                AND (?4 IS NULL OR t.category_id = ?4)
                AND (
                     ?5 IS NULL
-                    OR LOWER(COALESCE(t.payee, '')) LIKE ?5
-                    OR LOWER(COALESCE(t.note, '')) LIKE ?5
-                    OR LOWER(source.name) LIKE ?5
-                    OR LOWER(COALESCE(target.name, '')) LIKE ?5
-                    OR LOWER(COALESCE(category.name, '')) LIKE ?5
+                    OR LOWER(COALESCE(t.payee, '')) LIKE ?5 ESCAPE '\\'
+                    OR LOWER(COALESCE(t.note, '')) LIKE ?5 ESCAPE '\\'
+                    OR LOWER(source.name) LIKE ?5 ESCAPE '\\'
+                    OR LOWER(COALESCE(target.name, '')) LIKE ?5 ESCAPE '\\'
+                    OR LOWER(COALESCE(category.name, '')) LIKE ?5 ESCAPE '\\'
                )
                AND (?6 = 1 OR t.deleted_at IS NULL)
              ORDER BY t.txn_date DESC, t.id DESC
@@ -727,6 +756,7 @@ impl Db {
         to: &str,
         account_ref: Option<&str>,
     ) -> Result<SummaryRecord, AppError> {
+        validate_date_range(Some(from), Some(to), "summary range")?;
         match account_ref {
             Some(reference) => self.summary_for_account(from, to, reference),
             None => self.summary_all_accounts(from, to),
@@ -737,38 +767,56 @@ impl Db {
         &self,
         months: usize,
     ) -> Result<Vec<MonthlyCashFlowPoint>, AppError> {
-        let months = months.max(1);
+        let months = months.clamp(1, 60);
         let current = Local::now().date_naive();
         let current_start = NaiveDate::from_ymd_opt(current.year(), current.month(), 1)
             .expect("current month should always be valid");
         let first_start = add_months_with_day(current_start, -((months - 1) as i32), 1)?;
-        let mut points = Vec::with_capacity(months);
+        let last_start = add_months_with_day(first_start, (months - 1) as i32, 1)?;
+        let last_end = add_months_with_day(last_start, 1, 1)?
+            .pred_opt()
+            .expect("previous day should exist for month boundary");
 
+        let mut totals: HashMap<String, (i64, i64)> = HashMap::new();
+        let mut statement = self.conn.prepare(
+            "SELECT
+                substr(txn_date, 1, 7),
+                COALESCE(SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN kind = 'expense' THEN amount_cents ELSE 0 END), 0)
+             FROM transactions
+             WHERE deleted_at IS NULL
+               AND txn_date >= ?1
+               AND txn_date <= ?2
+             GROUP BY substr(txn_date, 1, 7)",
+        )?;
+        let rows = statement.query_map(
+            params![
+                first_start.format("%Y-%m-%d").to_string(),
+                last_end.format("%Y-%m-%d").to_string()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            let (month, income, expense) = row?;
+            totals.insert(month, (income, expense));
+        }
+
+        let mut points = Vec::with_capacity(months);
         for step in 0..months {
             let month_start = add_months_with_day(first_start, step as i32, 1)?;
-            let next_start = add_months_with_day(month_start, 1, 1)?;
-            let month_end = next_start
-                .pred_opt()
-                .expect("previous day should exist for month boundary");
-            let (income_cents, expense_cents): (i64, i64) = self.conn.query_row(
-                "SELECT
-                    COALESCE(SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN kind = 'expense' THEN amount_cents ELSE 0 END), 0)
-                 FROM transactions
-                 WHERE deleted_at IS NULL
-                   AND txn_date >= ?1
-                   AND txn_date <= ?2",
-                params![
-                    month_start.format("%Y-%m-%d").to_string(),
-                    month_end.format("%Y-%m-%d").to_string()
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
+            let key = month_start.format("%Y-%m").to_string();
+            let (income_cents, expense_cents) = totals.get(&key).copied().unwrap_or((0, 0));
             points.push(MonthlyCashFlowPoint {
-                month: month_start.format("%Y-%m").to_string(),
+                month: key,
                 income_cents,
                 expense_cents,
-                net_cents: income_cents - expense_cents,
+                net_cents: income_cents.saturating_sub(expense_cents),
             });
         }
 
@@ -809,7 +857,7 @@ impl Db {
     }
 
     pub fn total_balance_trend(&self, months: usize) -> Result<Vec<BalanceTrendPoint>, AppError> {
-        let months = months.max(1);
+        let months = months.clamp(1, 60);
         let current = Local::now().date_naive();
         let current_start = NaiveDate::from_ymd_opt(current.year(), current.month(), 1)
             .expect("current month should always be valid");
@@ -819,27 +867,53 @@ impl Db {
             [],
             |row| row.get(0),
         )?;
+        let last_start = add_months_with_day(first_start, (months - 1) as i32, 1)?;
+        let last_end = add_months_with_day(last_start, 1, 1)?
+            .pred_opt()
+            .expect("previous day should exist for month boundary");
+
+        let mut monthly: Vec<(String, i64, i64)> = Vec::new();
+        let mut statement = self.conn.prepare(
+            "SELECT
+                substr(txn_date, 1, 7),
+                COALESCE(SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN kind = 'expense' THEN amount_cents ELSE 0 END), 0)
+             FROM transactions
+             WHERE deleted_at IS NULL
+               AND txn_date <= ?1
+             GROUP BY substr(txn_date, 1, 7)
+             ORDER BY substr(txn_date, 1, 7) ASC",
+        )?;
+        let rows =
+            statement.query_map(params![last_end.format("%Y-%m-%d").to_string()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+        for row in rows {
+            monthly.push(row?);
+        }
+
         let mut points = Vec::with_capacity(months);
+        let mut cursor = 0_usize;
+        let mut running_income = 0_i64;
+        let mut running_expense = 0_i64;
 
         for step in 0..months {
             let month_start = add_months_with_day(first_start, step as i32, 1)?;
-            let next_start = add_months_with_day(month_start, 1, 1)?;
-            let month_end = next_start
-                .pred_opt()
-                .expect("previous day should exist for month boundary");
-            let (income_cents, expense_cents): (i64, i64) = self.conn.query_row(
-                "SELECT
-                    COALESCE(SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN kind = 'expense' THEN amount_cents ELSE 0 END), 0)
-                 FROM transactions
-                 WHERE deleted_at IS NULL
-                   AND txn_date <= ?1",
-                params![month_end.format("%Y-%m-%d").to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
+            let key = month_start.format("%Y-%m").to_string();
+            while cursor < monthly.len() && monthly[cursor].0 <= key {
+                running_income = running_income.saturating_add(monthly[cursor].1);
+                running_expense = running_expense.saturating_add(monthly[cursor].2);
+                cursor += 1;
+            }
             points.push(BalanceTrendPoint {
-                month: month_start.format("%Y-%m").to_string(),
-                balance_cents: opening_total + income_cents - expense_cents,
+                month: key,
+                balance_cents: opening_total
+                    .saturating_add(running_income)
+                    .saturating_sub(running_expense),
             });
         }
 
@@ -850,7 +924,7 @@ impl Db {
         &self,
         weeks: usize,
     ) -> Result<Vec<WeeklyBalancePoint>, AppError> {
-        let weeks = weeks.max(1);
+        let weeks = weeks.clamp(1, 52);
         let today = Local::now().date_naive();
         let current_week_start =
             today - Duration::days(today.weekday().num_days_from_monday() as i64);
@@ -860,24 +934,51 @@ impl Db {
             [],
             |row| row.get(0),
         )?;
+        let last_week_iso = (first_week_start + Duration::weeks((weeks - 1) as i64))
+            .format("%Y-%m-%d")
+            .to_string();
+
+        let mut daily: Vec<(String, i64, i64)> = Vec::new();
+        let mut statement = self.conn.prepare(
+            "SELECT
+                txn_date,
+                COALESCE(SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN kind = 'expense' THEN amount_cents ELSE 0 END), 0)
+             FROM transactions
+             WHERE deleted_at IS NULL
+               AND txn_date < ?1
+             GROUP BY txn_date
+             ORDER BY txn_date ASC",
+        )?;
+        let rows = statement.query_map(params![last_week_iso], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            daily.push(row?);
+        }
+
         let mut points = Vec::with_capacity(weeks);
+        let mut cursor = 0_usize;
+        let mut running_income = 0_i64;
+        let mut running_expense = 0_i64;
 
         for step in 0..weeks {
             let week_start = first_week_start + Duration::weeks(step as i64);
             let week_start_iso = week_start.format("%Y-%m-%d").to_string();
-            let (income_cents, expense_cents): (i64, i64) = self.conn.query_row(
-                "SELECT
-                    COALESCE(SUM(CASE WHEN kind = 'income' THEN amount_cents ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN kind = 'expense' THEN amount_cents ELSE 0 END), 0)
-                 FROM transactions
-                 WHERE deleted_at IS NULL
-                   AND txn_date < ?1",
-                params![&week_start_iso],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
+            while cursor < daily.len() && daily[cursor].0 < week_start_iso {
+                running_income = running_income.saturating_add(daily[cursor].1);
+                running_expense = running_expense.saturating_add(daily[cursor].2);
+                cursor += 1;
+            }
             points.push(WeeklyBalancePoint {
                 week_start: week_start_iso,
-                opening_balance_cents: opening_total + income_cents - expense_cents,
+                opening_balance_cents: opening_total
+                    .saturating_add(running_income)
+                    .saturating_sub(running_expense),
             });
         }
 
@@ -923,16 +1024,18 @@ impl Db {
         for transaction in &eligible {
             if selected_lookup.contains(&transaction.id) {
                 selected_count += 1;
-                cleared_delta += transaction_effect_for_account(
+                cleared_delta = cleared_delta.saturating_add(transaction_effect_for_account(
                     account_id,
                     transaction.kind,
                     transaction.amount_cents,
                     transaction.account_id,
                     transaction.to_account_id,
-                );
+                ));
             }
         }
-        let cleared_balance_cents = opening_balance_cents + cleared_delta;
+        cleared_delta = cleared_delta
+            .saturating_add(self.reconciled_delta_cents(account_id, statement_ending_on)?);
+        let cleared_balance_cents = opening_balance_cents.saturating_add(cleared_delta);
         if cleared_balance_cents != statement_balance_cents {
             return Err(AppError::Validation(format!(
                 "selected transactions clear to {}, but the statement balance is {}",
@@ -941,6 +1044,7 @@ impl Db {
             )));
         }
 
+        let write = self.begin_write()?;
         self.conn.execute(
             "INSERT INTO reconciliations (account_id, statement_ending_on, statement_balance_cents, cleared_balance_cents, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -966,6 +1070,7 @@ impl Db {
             ));
         }
 
+        write.commit()?;
         Ok(reconciliation_id)
     }
 
@@ -1027,12 +1132,14 @@ impl Db {
             )));
         }
 
+        let write = self.begin_write()?;
         self.conn.execute(
             "UPDATE transactions SET reconciliation_id = NULL, updated_at = ?1 WHERE reconciliation_id = ?2",
             params![now_timestamp(), id],
         )?;
         self.conn
             .execute("DELETE FROM reconciliations WHERE id = ?1", params![id])?;
+        write.commit()?;
         Ok(())
     }
 
@@ -1148,6 +1255,7 @@ impl Db {
         };
         self.validate_resolved_recurring_rule(&resolved)?;
 
+        let write = self.begin_write()?;
         self.conn.execute(
             "DELETE FROM recurring_occurrences WHERE rule_id = ?1 AND status = 'pending'",
             params![patch.id],
@@ -1191,6 +1299,7 @@ impl Db {
                 patch.id,
             ],
         )?;
+        write.commit()?;
         Ok(())
     }
 
@@ -1292,6 +1401,7 @@ impl Db {
             )));
         }
 
+        let write = self.begin_write()?;
         self.conn.execute(
             "UPDATE transactions SET recurring_rule_id = NULL, updated_at = ?1 WHERE recurring_rule_id = ?2",
             params![now_timestamp(), id],
@@ -1302,12 +1412,14 @@ impl Db {
         )?;
         self.conn
             .execute("DELETE FROM recurring_rules WHERE id = ?1", params![id])?;
+        write.commit()?;
         Ok(())
     }
 
     pub fn run_due_recurring(&self, through: &str) -> Result<usize, AppError> {
         self.sync_due_occurrences(through)?;
-        let due = self.list_due_occurrences(through)?;
+        let due = self.list_due_occurrences_inner(through)?;
+        let write = self.begin_write()?;
         let mut posted = 0_usize;
         for occurrence in due {
             if occurrence.status != OccurrenceStatus::Pending {
@@ -1333,6 +1445,7 @@ impl Db {
             )?;
             posted += 1;
         }
+        write.commit()?;
         Ok(posted)
     }
 
@@ -1341,6 +1454,13 @@ impl Db {
         through: &str,
     ) -> Result<Vec<RecurringOccurrenceRecord>, AppError> {
         self.sync_due_occurrences(through)?;
+        self.list_due_occurrences_inner(through)
+    }
+
+    fn list_due_occurrences_inner(
+        &self,
+        through: &str,
+    ) -> Result<Vec<RecurringOccurrenceRecord>, AppError> {
         let mut statement = self.conn.prepare(
             "SELECT
                 o.id,
@@ -1421,7 +1541,8 @@ impl Db {
             None => None,
         };
         let timestamp = now_timestamp();
-        match scenario_id {
+        let write = self.begin_write()?;
+        let id = match scenario_id {
             Some(scenario_id) => {
                 let existing: Option<(i64, Option<i64>)> = self
                     .conn
@@ -1478,14 +1599,9 @@ impl Db {
                                  account_id = ?2,
                                  updated_at = ?3
                              WHERE id = ?4",
-                            params![
-                                amount_cents,
-                                account_id,
-                                timestamp,
-                                id
-                            ],
+                            params![amount_cents, account_id, timestamp, id],
                         )?;
-                        Ok(id)
+                        id
                     }
                     None => {
                         self.conn.execute(
@@ -1508,7 +1624,7 @@ impl Db {
                                 timestamp,
                             ],
                         )?;
-                        Ok(self.conn.last_insert_rowid())
+                        self.conn.last_insert_rowid()
                     }
                 }
             }
@@ -1548,14 +1664,9 @@ impl Db {
                                  account_id = ?2,
                                  updated_at = ?3
                              WHERE id = ?4",
-                            params![
-                                amount_cents,
-                                account_id,
-                                timestamp,
-                                id
-                            ],
+                            params![amount_cents, account_id, timestamp, id],
                         )?;
-                        Ok(id)
+                        id
                     }
                     None => {
                         self.conn.execute(
@@ -1576,11 +1687,13 @@ impl Db {
                                 timestamp,
                             ],
                         )?;
-                        Ok(self.conn.last_insert_rowid())
+                        self.conn.last_insert_rowid()
                     }
                 }
             }
-        }
+        };
+        write.commit()?;
+        Ok(id)
     }
 
     pub fn delete_budget(
@@ -1760,7 +1873,8 @@ impl Db {
             None => None,
         };
         let (from, to) = month_bounds(&month)?;
-        let mut rows_by_category: BTreeMap<(i64, Option<i64>), BudgetStatusRecord> = BTreeMap::new();
+        let mut rows_by_category: BTreeMap<(i64, Option<i64>), BudgetStatusRecord> =
+            BTreeMap::new();
 
         let mut budget_statement = self.conn.prepare(
             "SELECT
@@ -1902,8 +2016,8 @@ impl Db {
                         over_budget: false,
                     })
             };
-            entry.spent_cents += spent_cents;
-            entry.remaining_cents = entry.budget_cents - entry.spent_cents;
+            entry.spent_cents = entry.spent_cents.saturating_add(spent_cents);
+            entry.remaining_cents = entry.budget_cents.saturating_sub(entry.spent_cents);
             entry.over_budget = entry.budget_cents > 0 && entry.spent_cents > entry.budget_cents;
         }
 
@@ -2018,6 +2132,7 @@ impl Db {
         from: Option<&str>,
         to: Option<&str>,
     ) -> Result<Vec<PlanningItemRecord>, AppError> {
+        validate_date_range(from, to, "plan list")?;
         let scenario_id = match scenario_ref
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -2143,6 +2258,7 @@ impl Db {
             recurring_rule_id: None,
         };
         self.validate_resolved_transaction(&transaction)?;
+        let write = self.begin_write()?;
         let transaction_id = self.insert_transaction(&transaction)?;
         self.conn.execute(
             "UPDATE planning_items
@@ -2151,6 +2267,7 @@ impl Db {
              WHERE id = ?3",
             params![transaction_id, now_timestamp(), id],
         )?;
+        write.commit()?;
         Ok(transaction_id)
     }
 
@@ -2388,12 +2505,16 @@ impl Db {
         account_ref: Option<&str>,
         days: usize,
     ) -> Result<ForecastSnapshot, AppError> {
+        if !(1..=365).contains(&days) {
+            return Err(AppError::Validation(
+                "forecast days must be between 1 and 365".to_string(),
+            ));
+        }
         let scenario_id = self.resolve_optional_scenario_ref(scenario_ref)?;
         let account_id = match account_ref.map(str::trim).filter(|value| !value.is_empty()) {
             Some(reference) => Some(self.resolve_account_ref(reference)?),
             None => None,
         };
-        let days = days.clamp(1, 365);
         let today = Local::now().date_naive();
         let daily_end = today + Duration::days((days - 1) as i64);
         let month_start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
@@ -2481,19 +2602,20 @@ impl Db {
             let mut outflow_cents = 0_i64;
             if let Some(events) = events_by_date.get(&cursor) {
                 for event in events {
-                    inflow_cents += event.inflow_cents;
-                    outflow_cents += event.outflow_cents;
+                    inflow_cents = inflow_cents.saturating_add(event.inflow_cents);
+                    outflow_cents = outflow_cents.saturating_add(event.outflow_cents);
                     for (event_account_id, delta_cents) in &event.per_account_delta {
-                        *account_balances.entry(*event_account_id).or_insert(0) += *delta_cents;
+                        let entry = account_balances.entry(*event_account_id).or_insert(0);
+                        *entry = entry.saturating_add(*delta_cents);
                     }
                 }
             }
             let closing_balance = forecast_scope_balance(&account_balances, account_id);
             let month_key = cursor.format("%Y-%m").to_string();
             if let Some(point) = monthly.iter_mut().find(|point| point.month == month_key) {
-                point.inflow_cents += inflow_cents;
-                point.outflow_cents += outflow_cents;
-                point.net_cents = point.inflow_cents - point.outflow_cents;
+                point.inflow_cents = point.inflow_cents.saturating_add(inflow_cents);
+                point.outflow_cents = point.outflow_cents.saturating_add(outflow_cents);
+                point.net_cents = point.inflow_cents.saturating_sub(point.outflow_cents);
                 point.ending_balance_cents = closing_balance;
             }
 
@@ -2536,7 +2658,7 @@ impl Db {
                     opening_balance_cents: opening_balance,
                     inflow_cents,
                     outflow_cents,
-                    net_cents: inflow_cents - outflow_cents,
+                    net_cents: inflow_cents.saturating_sub(outflow_cents),
                     closing_balance_cents: closing_balance,
                     alerts: point_alerts,
                 });
@@ -3248,7 +3370,8 @@ impl Db {
     ) -> Result<(Vec<BudgetForecastRow>, Vec<String>), AppError> {
         let start_month = start.format("%Y-%m").to_string();
         let end_month = end.format("%Y-%m").to_string();
-        let mut rows_by_key: BTreeMap<(String, i64, Option<i64>), BudgetForecastRow> = BTreeMap::new();
+        let mut rows_by_key: BTreeMap<(String, i64, Option<i64>), BudgetForecastRow> =
+            BTreeMap::new();
 
         let mut baseline_statement = self.conn.prepare(
             "SELECT
@@ -3336,7 +3459,7 @@ impl Db {
             if item.due_on < start || item.due_on > end {
                 continue;
             }
-            if account_id.is_some() && item.account_id != account_id.unwrap() {
+            if account_id.is_some_and(|id| item.account_id != id) {
                 continue;
             }
             items.push(BillCalendarItem {
@@ -3363,7 +3486,7 @@ impl Db {
             if occurrence.due_on < start || occurrence.due_on > end {
                 continue;
             }
-            if account_id.is_some() && occurrence.account_id != account_id.unwrap() {
+            if account_id.is_some_and(|id| occurrence.account_id != id) {
                 continue;
             }
             items.push(BillCalendarItem {
@@ -3397,6 +3520,31 @@ impl Db {
         events_by_date: &mut BTreeMap<NaiveDate, Vec<ForecastEvent>>,
     ) -> Result<(), AppError> {
         let current_month = today.format("%Y-%m").to_string();
+        let mut current_spend: HashMap<(i64, i64), i64> = HashMap::new();
+        if budget_rows.iter().any(|row| row.month == current_month) {
+            let (month_from, _) = month_bounds(&current_month)?;
+            let today_iso = today.format("%Y-%m-%d").to_string();
+            let mut statement = self.conn.prepare(
+                "SELECT category_id, account_id, COALESCE(SUM(amount_cents), 0)
+                 FROM transactions
+                 WHERE deleted_at IS NULL
+                   AND kind = 'expense'
+                   AND txn_date >= ?1
+                   AND txn_date <= ?2
+                 GROUP BY category_id, account_id",
+            )?;
+            let rows = statement.query_map(params![month_from, today_iso], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (category_id, account_id, spent) = row?;
+                current_spend.insert((category_id, account_id), spent);
+            }
+        }
         for row in budget_rows {
             let Some(account_id) = row.account_id else {
                 warnings.push(format!(
@@ -3419,9 +3567,11 @@ impl Db {
             }
             let mut amount_cents = row.amount_cents;
             if row.month == current_month {
-                let spent_cents =
-                    self.actual_budget_spend_so_far(&row.month, row.category_id, Some(account_id))?;
-                amount_cents = (row.amount_cents - spent_cents).max(0);
+                let spent_cents = current_spend
+                    .get(&(row.category_id, account_id))
+                    .copied()
+                    .unwrap_or(0);
+                amount_cents = row.amount_cents.saturating_sub(spent_cents).max(0);
             }
             if amount_cents == 0 {
                 continue;
@@ -3448,30 +3598,6 @@ impl Db {
         Ok(())
     }
 
-    fn actual_budget_spend_so_far(
-        &self,
-        month: &str,
-        category_id: i64,
-        account_id: Option<i64>,
-    ) -> Result<i64, AppError> {
-        let (from, _) = month_bounds(month)?;
-        let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
-        self.conn
-            .query_row(
-                "SELECT COALESCE(SUM(amount_cents), 0)
-                 FROM transactions
-                 WHERE deleted_at IS NULL
-                   AND kind = 'expense'
-                   AND category_id = ?1
-                   AND txn_date >= ?2
-                   AND txn_date <= ?3
-                   AND (?4 IS NULL OR account_id = ?4)",
-                params![category_id, from, today, account_id],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
-    }
-
     pub fn import_transactions(&self, plan: &ImportPlan) -> Result<ImportResult, AppError> {
         const DEFAULT_INCOME_CATEGORY: &str = "Uncategorized Income";
         const DEFAULT_EXPENSE_CATEGORY: &str = "Uncategorized Expense";
@@ -3480,12 +3606,13 @@ impl Db {
         let account_name = self.account_name(account_id)?;
         let rows = load_import_rows(plan, &self.currency_code()?)?;
 
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let write = self.begin_write()?;
 
         let outcome = (|| -> Result<ImportResult, AppError> {
             let mut preview = Vec::with_capacity(rows.len());
             let mut imported_count = 0_usize;
             let mut duplicate_count = 0_usize;
+            let mut category_cache: HashMap<(String, CategoryKind), (i64, String)> = HashMap::new();
 
             for row in rows {
                 if row.kind == TransactionKind::Transfer {
@@ -3494,7 +3621,7 @@ impl Db {
                     ));
                 }
 
-                let category_id = match expected_category_kind(row.kind) {
+                let category = match expected_category_kind(row.kind) {
                     Some(expected_kind) => {
                         let category_ref = row
                             .category_ref
@@ -3507,11 +3634,18 @@ impl Db {
                                 CategoryKind::Income => DEFAULT_INCOME_CATEGORY.to_string(),
                                 CategoryKind::Expense => DEFAULT_EXPENSE_CATEGORY.to_string(),
                             });
-                        Some(self.ensure_import_category(&category_ref, &expected_kind)?)
+                        // Match SQLite NOCASE, which folds ASCII letters only.
+                        let key = (category_ref.to_ascii_lowercase(), expected_kind);
+                        if !category_cache.contains_key(&key) {
+                            let id = self.ensure_import_category(&category_ref, &expected_kind)?;
+                            category_cache.insert(key.clone(), (id, self.category_name(id)?));
+                        }
+                        category_cache.get(&key).cloned()
                     }
                     None => None,
                 };
-                let category_name = category_id.map(|id| self.category_name(id)).transpose()?;
+                let category_id = category.as_ref().map(|(id, _)| *id);
+                let category_name = category.map(|(_, name)| name);
 
                 let resolved = ResolvedTransaction {
                     txn_date: row.txn_date.clone(),
@@ -3561,20 +3695,13 @@ impl Db {
             })
         })();
 
-        match outcome {
-            Ok(result) => {
-                if plan.dry_run() {
-                    self.conn.execute_batch("ROLLBACK")?;
-                } else {
-                    self.conn.execute_batch("COMMIT")?;
-                }
-                Ok(result)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
+        let result = outcome?;
+        if plan.dry_run() {
+            write.rollback()?;
+        } else {
+            write.commit()?;
         }
+        Ok(result)
     }
 
     fn import_duplicate_exists(&self, transaction: &ResolvedTransaction) -> Result<bool, AppError> {
@@ -4186,7 +4313,11 @@ impl Db {
              CREATE INDEX IF NOT EXISTS idx_planning_scenarios_name ON planning_scenarios(name);
              CREATE INDEX IF NOT EXISTS idx_scenario_budget_overrides_lookup ON scenario_budget_overrides(scenario_id, month, category_id);
              CREATE UNIQUE INDEX IF NOT EXISTS idx_scenario_budget_overrides_unscoped_unique
-                 ON scenario_budget_overrides(scenario_id, month, category_id) WHERE account_id IS NULL;",
+                 ON scenario_budget_overrides(scenario_id, month, category_id) WHERE account_id IS NULL;
+             CREATE INDEX IF NOT EXISTS idx_transactions_deleted_date ON transactions(deleted_at, txn_date);
+             CREATE INDEX IF NOT EXISTS idx_transactions_recon_deleted ON transactions(reconciliation_id, deleted_at);
+             CREATE INDEX IF NOT EXISTS idx_recurring_occurrences_rule_status ON recurring_occurrences(rule_id, status);
+             CREATE INDEX IF NOT EXISTS idx_budgets_month_category_account ON budgets(month, category_id, account_id);",
         )?;
         Ok(())
     }
@@ -4472,7 +4603,10 @@ impl Db {
             transaction_count,
             income_cents,
             expense_cents,
-            net_cents: income_cents - expense_cents + transfer_in_cents - transfer_out_cents,
+            net_cents: income_cents
+                .saturating_sub(expense_cents)
+                .saturating_add(transfer_in_cents)
+                .saturating_sub(transfer_out_cents),
             transfer_in_cents,
             transfer_out_cents,
         })
@@ -4511,7 +4645,10 @@ impl Db {
             transaction_count,
             income_cents,
             expense_cents,
-            net_cents: income_cents - expense_cents + transfer_in_cents - transfer_out_cents,
+            net_cents: income_cents
+                .saturating_sub(expense_cents)
+                .saturating_add(transfer_in_cents)
+                .saturating_sub(transfer_out_cents),
             transfer_in_cents,
             transfer_out_cents,
         })
@@ -4556,6 +4693,33 @@ impl Db {
             map_transaction_row(row)
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn reconciled_delta_cents(
+        &self,
+        account_id: i64,
+        statement_ending_on: &str,
+    ) -> Result<i64, AppError> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(
+                    CASE
+                        WHEN kind = 'income' AND account_id = ?1 THEN amount_cents
+                        WHEN kind = 'expense' AND account_id = ?1 THEN -amount_cents
+                        WHEN kind = 'transfer' AND account_id = ?1 THEN -amount_cents
+                        WHEN kind = 'transfer' AND to_account_id = ?1 THEN amount_cents
+                        ELSE 0
+                    END
+                ), 0)
+                 FROM transactions
+                 WHERE deleted_at IS NULL
+                   AND reconciliation_id IS NOT NULL
+                   AND txn_date <= ?2
+                   AND (account_id = ?1 OR to_account_id = ?1)",
+                params![account_id, statement_ending_on],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     fn lookup_account_opening_balance(&self, account_id: i64) -> Result<i64, AppError> {
@@ -4635,9 +4799,9 @@ impl Db {
             recurring_rule_id: None,
         })?;
 
-        if rule.interval <= 0 {
+        if rule.interval <= 0 || rule.interval > 1000 {
             return Err(AppError::Validation(
-                "recurring interval must be positive".to_string(),
+                "recurring interval must be between 1 and 1000".to_string(),
             ));
         }
 
@@ -4879,13 +5043,25 @@ impl Db {
 
     fn sync_due_occurrences(&self, through: &str) -> Result<(), AppError> {
         let through_date = parse_date(through)?;
-        let mut statement = self
-            .conn
-            .prepare("SELECT id FROM recurring_rules WHERE paused = 0 ORDER BY id ASC")?;
+        // Avoid taking the write lock when nothing is due.
+        let mut statement = self.conn.prepare(
+            "SELECT id FROM recurring_rules
+             WHERE paused = 0
+               AND next_due_on <= ?1
+               AND (end_on IS NULL OR next_due_on <= end_on)
+             ORDER BY id ASC",
+        )?;
         let ids = statement
-            .query_map([], |row| row.get::<_, i64>(0))?
+            .query_map(
+                params![through_date.format("%Y-%m-%d").to_string()],
+                |row| row.get::<_, i64>(0),
+            )?
             .collect::<Result<Vec<_>, _>>()?;
+        if ids.is_empty() {
+            return Ok(());
+        }
 
+        let write = self.begin_write()?;
         for id in ids {
             let rule = self.load_recurring_rule(id)?;
             let mut due_on = parse_date(&rule.next_due_on)?;
@@ -4924,6 +5100,7 @@ impl Db {
             }
         }
 
+        write.commit()?;
         Ok(())
     }
 }
@@ -5240,6 +5417,21 @@ fn resolve_optional_patch(
     }
 }
 
+pub(crate) fn validate_date_range(
+    from: Option<&str>,
+    to: Option<&str>,
+    context: &str,
+) -> Result<(), AppError> {
+    let from = from.map(parse_date).transpose()?;
+    let to = to.map(parse_date).transpose()?;
+    if matches!((from, to), (Some(from), Some(to)) if from > to) {
+        return Err(AppError::Validation(format!(
+            "{context} requires --from to be on or before --to"
+        )));
+    }
+    Ok(())
+}
+
 fn normalize_date_value(raw: &str) -> Result<String, AppError> {
     Ok(parse_date(raw.trim())?.format("%Y-%m-%d").to_string())
 }
@@ -5275,8 +5467,13 @@ fn build_forecast_transaction_event(
             per_account_delta: vec![(account_id, -amount_cents)],
         },
         TransactionKind::Transfer => {
-            let target_id =
-                to_account_id.expect("transfer forecast events require a target account");
+            let Some(target_id) = to_account_id else {
+                return ForecastEvent {
+                    inflow_cents: 0,
+                    outflow_cents: 0,
+                    per_account_delta: Vec::new(),
+                };
+            };
             let (inflow_cents, outflow_cents) = match selected_account_id {
                 Some(selected_id) if selected_id == account_id => (0, amount_cents),
                 Some(selected_id) if selected_id == target_id => (amount_cents, 0),
@@ -5331,7 +5528,9 @@ fn forecast_scope_balance(
 ) -> i64 {
     match selected_account_id {
         Some(account_id) => *account_balances.get(&account_id).unwrap_or(&0),
-        None => account_balances.values().sum(),
+        None => account_balances
+            .values()
+            .fold(0_i64, |acc, value| acc.saturating_add(*value)),
     }
 }
 
@@ -5358,7 +5557,9 @@ fn build_goal_status_records(
             match goal.kind {
                 PlanningGoalKind::SinkingFund => {
                     let target_amount_cents = goal.target_amount_cents.unwrap_or_default();
-                    let remaining_cents = (target_amount_cents - current_balance_cents).max(0);
+                    let remaining_cents = target_amount_cents
+                        .saturating_sub(current_balance_cents)
+                        .max(0);
                     let due_on = goal
                         .due_on
                         .as_deref()
@@ -5374,7 +5575,9 @@ fn build_goal_status_records(
                 }
                 PlanningGoalKind::BalanceTarget => {
                     let minimum_balance_cents = goal.minimum_balance_cents.unwrap_or_default();
-                    let remaining_cents = (minimum_balance_cents - current_balance_cents).max(0);
+                    let remaining_cents = minimum_balance_cents
+                        .saturating_sub(current_balance_cents)
+                        .max(0);
                     let breach_date = goal_breach_dates.get(&goal.id).cloned();
                     (remaining_cents, 0, breach_date.is_none(), breach_date)
                 }
@@ -5420,10 +5623,10 @@ fn months_until_calendar_month(start: NaiveDate, end: NaiveDate) -> i32 {
 }
 
 fn divide_round_up(value: i64, divisor: i64) -> i64 {
-    if value <= 0 {
+    if value <= 0 || divisor <= 0 {
         0
     } else {
-        (value + divisor - 1) / divisor
+        value.saturating_sub(1) / divisor + 1
     }
 }
 
@@ -5564,13 +5767,24 @@ fn advance_recurrence(
     day_of_month: Option<u32>,
     _weekday: Option<Weekday>,
 ) -> Result<NaiveDate, AppError> {
+    // Rules saved before the 1000 cap existed can still have larger intervals.
+    if interval <= 0 {
+        return Err(AppError::Validation(
+            "recurring interval must be positive".to_string(),
+        ));
+    }
     match cadence {
-        RecurringCadence::Weekly => Ok(previous_due + Duration::days(7 * interval)),
+        RecurringCadence::Weekly => interval
+            .checked_mul(7)
+            .and_then(|days| previous_due.checked_add_days(Days::new(days as u64)))
+            .ok_or_else(|| AppError::Validation("recurring interval is too large".to_string())),
         RecurringCadence::Monthly => {
             let day = day_of_month.ok_or_else(|| {
                 AppError::Validation("monthly recurring rules require a day of month".to_string())
             })?;
-            add_months_with_day(previous_due, interval as i32, day)
+            let months = i32::try_from(interval)
+                .map_err(|_| AppError::Validation("recurring interval is too large".to_string()))?;
+            add_months_with_day(previous_due, months, day)
         }
     }
 }
@@ -5580,7 +5794,12 @@ fn add_months_with_day(
     months_to_add: i32,
     day: u32,
 ) -> Result<NaiveDate, AppError> {
-    let month_index = date.year() * 12 + date.month0() as i32 + months_to_add;
+    let month_index = date
+        .year()
+        .checked_mul(12)
+        .and_then(|base| base.checked_add(date.month0() as i32))
+        .and_then(|base| base.checked_add(months_to_add))
+        .ok_or_else(|| AppError::Validation("invalid monthly recurring schedule".to_string()))?;
     let year = month_index.div_euclid(12);
     let month0 = month_index.rem_euclid(12) as u32;
     NaiveDate::from_ymd_opt(year, month0 + 1, day)
@@ -5634,7 +5853,138 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
-    use super::resolve_db_path;
+    use super::{resolve_db_path, Db};
+
+    fn recurring_test_db(dir: &tempfile::TempDir) -> Db {
+        let db = Db::open_for_init(&dir.path().join("tracker.db")).unwrap();
+        db.init("EUR").unwrap();
+        db.add_account(
+            "Checking",
+            &crate::model::AccountKind::Checking,
+            0,
+            "2026-01-01",
+        )
+        .unwrap();
+        db.add_category("Rent", &crate::model::CategoryKind::Expense)
+            .unwrap();
+        db.add_recurring_rule(&crate::model::NewRecurringRule {
+            name: "Rent".to_string(),
+            kind: crate::model::TransactionKind::Expense,
+            amount_cents: 50000,
+            account: "Checking".to_string(),
+            to_account: None,
+            category: Some("Rent".to_string()),
+            payee: None,
+            note: None,
+            cadence: crate::model::RecurringCadence::Monthly,
+            interval: 1,
+            day_of_month: Some(1),
+            weekday: None,
+            start_on: "2026-01-01".to_string(),
+            next_due_on: None,
+            end_on: None,
+        })
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn due_list_accepts_rules_saved_with_large_intervals() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = recurring_test_db(&dir);
+        // Older versions only rejected intervals below 1.
+        db.conn
+            .execute("UPDATE recurring_rules SET interval = 5000", [])
+            .unwrap();
+        let due = db.list_due_occurrences("2026-03-31").unwrap();
+        assert_eq!(due.len(), 1);
+    }
+
+    #[test]
+    fn due_list_skips_write_lock_when_nothing_is_due() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = recurring_test_db(&dir);
+        db.list_due_occurrences("2026-03-31").unwrap();
+
+        let writer = rusqlite::Connection::open(dir.path().join("tracker.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        db.conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+        assert_eq!(db.list_due_occurrences("2026-03-31").unwrap().len(), 3);
+        writer.execute_batch("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn open_keeps_wal_and_full_sync() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Db::open_for_init(&dir.path().join("tracker.db")).unwrap();
+        let mode: String = db
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = db
+            .conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        assert_eq!(synchronous, 2, "FULL must sync every committed transaction");
+    }
+
+    #[test]
+    fn failed_commit_rolls_back_and_connection_stays_usable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Db::open_for_init(&dir.path().join("tracker.db")).unwrap();
+        db.init("EUR").unwrap();
+        db.add_account(
+            "Checking",
+            &crate::model::AccountKind::Checking,
+            0,
+            "2026-01-01",
+        )
+        .unwrap();
+        db.add_category("Food", &crate::model::CategoryKind::Expense)
+            .unwrap();
+        // A deferred foreign-key failure happens at COMMIT, after the budget write succeeds.
+        db.conn.execute_batch("CREATE TABLE commit_guard (account_id INTEGER REFERENCES accounts(id) DEFERRABLE INITIALLY DEFERRED);
+            CREATE TRIGGER reject_budget AFTER INSERT ON budgets BEGIN INSERT INTO commit_guard VALUES (-999); END;").unwrap();
+        assert!(db
+            .set_budget("2026-03", "Food", 1000, Some("Checking"), None)
+            .is_err());
+        assert!(
+            db.conn.is_autocommit(),
+            "failed commit must not leave an active transaction"
+        );
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM budgets", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        db.conn.execute_batch("DROP TRIGGER reject_budget").unwrap();
+        db.set_budget("2026-03", "Food", 1000, Some("Checking"), None)
+            .unwrap();
+    }
+
+    #[test]
+    fn queries_reject_inverted_date_ranges() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Db::open_for_init(&dir.path().join("tracker.db")).unwrap();
+        db.init("EUR").unwrap();
+        let filters = crate::model::TransactionFilters {
+            from: Some("2026-03-10".into()),
+            to: Some("2026-03-01".into()),
+            account: None,
+            category: None,
+            search: None,
+            limit: None,
+            include_deleted: false,
+        };
+        assert!(crate::services::transactions::TransactionService::new(&db)
+            .list(&filters)
+            .is_err());
+        assert!(db.summary("2026-03-10", "2026-03-01", None).is_err());
+        assert!(db
+            .list_planning_items(None, Some("2026-03-10"), Some("2026-03-01"))
+            .is_err());
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

@@ -94,7 +94,7 @@ pub struct AccountAddArgs {
     pub name: String,
     #[arg(long = "type", value_enum)]
     pub kind: AccountKind,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub opening_balance: Option<String>,
     #[arg(long)]
     pub opened_on: Option<String>,
@@ -107,7 +107,7 @@ pub struct AccountEditArgs {
     pub name: Option<String>,
     #[arg(long = "type", value_enum)]
     pub kind: Option<AccountKind>,
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub opening_balance: Option<String>,
     #[arg(long)]
     pub opened_on: Option<String>,
@@ -658,7 +658,7 @@ pub struct ReconcileStartArgs {
     pub account: String,
     #[arg(long = "to")]
     pub statement_ending_on: String,
-    #[arg(long = "statement-balance")]
+    #[arg(long = "statement-balance", allow_hyphen_values = true)]
     pub statement_balance: String,
     #[arg(long = "transaction-id")]
     pub transaction_ids: Vec<i64>,

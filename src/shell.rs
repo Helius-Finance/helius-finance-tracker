@@ -373,7 +373,7 @@ fn prompt_recurring(db_path: &Path, stdout: &mut dyn Write) -> Result<(), AppErr
         args.push(category);
     }
 
-    if cadence == "weekly" {
+    if cadence.eq_ignore_ascii_case("weekly") {
         let weekday =
             prompt_required(stdout, "Weekday (mon/tue/wed/thu/fri/sat/sun)", Some("mon"))?;
         args.push("--weekday".to_string());

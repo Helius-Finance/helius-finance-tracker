@@ -37,7 +37,7 @@ impl AccountKind {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum CategoryKind {
     Income,

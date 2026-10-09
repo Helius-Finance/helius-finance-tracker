@@ -628,7 +628,8 @@ pub fn export_transactions_csv(
     transactions: &[TransactionRecord],
 ) -> Result<(), AppError> {
     ensure_parent_dir(path)?;
-    let mut writer = csv::Writer::from_path(path)?;
+    let temporary = export_temporary_file(path)?;
+    let mut writer = csv::Writer::from_writer(temporary.as_file());
     writer.write_record([
         "id",
         "txn_date",
@@ -686,12 +687,16 @@ pub fn export_transactions_csv(
     }
 
     writer.flush()?;
+    drop(writer);
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 
 pub fn export_summary_csv(path: &Path, summary: &SummaryRecord) -> Result<(), AppError> {
     ensure_parent_dir(path)?;
-    let mut writer = csv::Writer::from_path(path)?;
+    let temporary = export_temporary_file(path)?;
+    let mut writer = csv::Writer::from_writer(temporary.as_file());
     writer.write_record([
         "from",
         "to",
@@ -730,7 +735,18 @@ pub fn export_summary_csv(path: &Path, summary: &SummaryRecord) -> Result<(), Ap
         summary.transfer_out_cents.to_string(),
     ])?;
     writer.flush()?;
+    drop(writer);
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+fn export_temporary_file(path: &Path) -> Result<tempfile::NamedTempFile, AppError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Ok(tempfile::NamedTempFile::new_in(parent)?)
 }
 
 fn write_json<T: Serialize + ?Sized>(writer: &mut dyn Write, value: &T) -> Result<(), AppError> {

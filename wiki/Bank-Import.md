@@ -124,7 +124,7 @@ helius import csv --input .\bank.csv --account Checking `
   --dry-run
 ```
 
-You must use either `--amount-column` or the `--debit-column` / `--credit-column` pair, not both. Split files must have exactly one side filled per row. A row with both debit and credit values, or with neither value, is rejected.
+You must use either `--amount-column` or the `--debit-column` / `--credit-column` pair, not both. Split files must have exactly one side filled per row; an empty cell or `0.00` counts as unfilled. A row with both debit and credit values, or with neither value, is rejected. `--default-type` cannot be combined with split columns, because the filled side already decides the type.
 
 ## Transaction Type And Amounts
 
@@ -141,6 +141,8 @@ Use `--type-column` when the CSV has a transaction type column. Supported type v
 | `income`, `credit`, `deposit`, `inflow`, `crdt` | `income` |
 | `expense`, `debit`, `withdrawal`, `outflow`, `dbit` | `expense` |
 
+A row is rejected when its type contradicts an explicitly signed amount, for example `income` with `-25.00` or `expense` with `+25.00`. Unsigned amounts take the type from the column.
+
 `transfer` is recognized by the parser but rejected by the import flow in this release. Import transfers manually so both accounts are linked correctly.
 
 Use `--default-type income` or `--default-type expense` only when all rows in a signed amount file should use that type regardless of sign.
@@ -152,6 +154,8 @@ Amount parsing accepts common US and European formats, including:
 - `1,234.56`
 - `1.234,56`
 - `(15.25)`
+
+Ambiguous values such as `1,0000` or `0.001` are rejected instead of being guessed.
 
 ## Categories, Payees, And Notes
 
@@ -200,7 +204,7 @@ This is the same importer used by the CLI. The TUI does not have a separate pars
 
 `helius import camt053` supports the common single-currency booked-entry case:
 
-- Only booked entries are imported.
+- Only booked entries are imported. A file that contains no booked entries is rejected.
 - `CRDT` entries become income.
 - `DBIT` entries become expenses.
 - Booking date is preferred; value date is used when booking date is missing.
