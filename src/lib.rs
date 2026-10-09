@@ -738,12 +738,7 @@ fn handle_budget(db: Db, command: BudgetCommand, stdout: &mut dyn Write) -> Resu
             let month = normalize_month(&month)?;
             let account = normalize_optional_string(account);
             let scenario = normalize_optional_string(scenario);
-            service.delete(
-                &month,
-                &category,
-                account.as_deref(),
-                scenario.as_deref(),
-            )?;
+            service.delete(&month, &category, account.as_deref(), scenario.as_deref())?;
             let message = match scenario {
                 Some(name) => format!("Reset scenario budget for {category} in {month} ({name})."),
                 None => format!("Deleted budget for {category} in {month}."),
@@ -1184,7 +1179,7 @@ fn handle_reconcile(
             let reconciliation_id = service.start(
                 &account,
                 &normalize_date(&statement_ending_on)?,
-                parse_amount_to_cents(&statement_balance)?,
+                parse_balance_to_cents(&statement_balance)?,
                 &transaction_ids,
             )?;
             writeln!(
@@ -1383,6 +1378,11 @@ fn resolve_export_range(
     require_bounded_range: bool,
 ) -> Result<(Option<String>, Option<String>), AppError> {
     if let Some(month) = month {
+        if from.is_some() || to.is_some() {
+            return Err(AppError::Validation(
+                "export range uses either --month or --from/--to, not both".to_string(),
+            ));
+        }
         let (from, to) = month_range(&month)?;
         return Ok((Some(from), Some(to)));
     }
@@ -1394,6 +1394,14 @@ fn resolve_export_range(
         return Err(AppError::Validation(
             "summary export requires --month or both --from and --to".to_string(),
         ));
+    }
+
+    if let (Some(from_value), Some(to_value)) = (from.as_deref(), to.as_deref()) {
+        if from_value > to_value {
+            return Err(AppError::Validation(
+                "export range requires --from to be on or before --to".to_string(),
+            ));
+        }
     }
 
     Ok((from, to))
@@ -1490,7 +1498,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{ensure_interactive_db_ready, month_range, normalize_date};
+    use super::{ensure_interactive_db_ready, month_range, normalize_date, resolve_export_range};
     use crate::db::Db;
 
     #[test]
@@ -1508,6 +1516,33 @@ mod tests {
         let (from, to) = month_range("2026-02").unwrap();
         assert_eq!(from, "2026-02-01");
         assert_eq!(to, "2026-02-28");
+    }
+
+    #[test]
+    fn export_range_rejects_month_with_from_to() {
+        assert!(resolve_export_range(
+            Some("2026-03".to_string()),
+            Some("2026-03-01".to_string()),
+            None,
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn export_range_rejects_inverted_dates() {
+        assert!(resolve_export_range(
+            None,
+            Some("2026-03-10".to_string()),
+            Some("2026-03-01".to_string()),
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn month_range_rejects_out_of_range_year() {
+        assert!(month_range("2147483647-12").is_err());
     }
 
     #[test]

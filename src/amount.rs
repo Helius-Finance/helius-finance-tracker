@@ -94,7 +94,7 @@ fn parse_amount_core(input: &str, allow_negative: bool) -> Result<i64, AppError>
 
 pub fn format_cents(amount_cents: i64) -> String {
     let sign = if amount_cents < 0 { "-" } else { "" };
-    let absolute = amount_cents.abs();
+    let absolute = amount_cents.unsigned_abs();
     let units = absolute / 100;
     let cents = absolute % 100;
     format!("{sign}{units}.{cents:02}")
@@ -143,6 +143,11 @@ mod tests {
     fn formats_cents() {
         assert_eq!(format_cents(1234), "12.34");
         assert_eq!(format_cents(-987), "-9.87");
+    }
+
+    #[test]
+    fn formats_i64_min() {
+        assert_eq!(format_cents(i64::MIN), "-92233720368547758.08");
     }
 }
 // SPDX-License-Identifier: AGPL-3.0-only

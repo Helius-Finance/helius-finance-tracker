@@ -698,6 +698,11 @@ pub fn resolve_csv_import_plan(request: CsvImportRequest) -> Result<CsvImportPla
             "CSV delimiter must be a single ASCII character".to_string(),
         ));
     }
+    if date_format.trim().is_empty() {
+        return Err(AppError::Validation(
+            "CSV date format cannot be empty".to_string(),
+        ));
+    }
 
     let amount_strategy = resolve_amount_strategy(
         request.amount_column,
@@ -711,6 +716,11 @@ pub fn resolve_csv_import_plan(request: CsvImportRequest) -> Result<CsvImportPla
     if matches!(default_kind, Some(TransactionKind::Transfer)) {
         return Err(AppError::Validation(
             "import defaults cannot use transfer as a transaction type".to_string(),
+        ));
+    }
+    if matches!(amount_strategy, CsvAmountStrategy::Split { .. }) && default_kind.is_some() {
+        return Err(AppError::Validation(
+            "default type cannot be used with --debit-column/--credit-column".to_string(),
         ));
     }
 
@@ -821,21 +831,21 @@ pub fn parse_import_amount_to_cents(value: &str) -> Result<i64, AppError> {
     } else if cleaned.ends_with('-') {
         negative = true;
         cleaned = cleaned[..cleaned.len() - 1].to_string();
-    } else if cleaned[1..].contains('-') {
+    } else if cleaned.chars().skip(1).any(|ch| ch == '-') {
         // `$-120.00` is a sign after the symbol; `12-34` is malformed.
         let mut chars = cleaned.chars();
         let first = chars.next().unwrap_or_default();
         if matches!(first, '$' | '\u{20ac}') && chars.next() == Some('-') {
             negative = true;
-            cleaned = cleaned[2..].to_string();
+            cleaned = chars.as_str().to_string();
         } else {
             return Err(AppError::Validation(format!(
                 "unsupported import amount `{value}`"
             )));
         }
     }
-    if cleaned.starts_with('$') || cleaned.starts_with('\u{20ac}') {
-        cleaned = cleaned[1..].to_string();
+    if let Some(rest) = cleaned.strip_prefix(['$', '\u{20ac}']) {
+        cleaned = rest.to_string();
     }
 
     let cleaned: String = cleaned
@@ -848,16 +858,24 @@ pub fn parse_import_amount_to_cents(value: &str) -> Result<i64, AppError> {
             "unsupported import amount `{value}`"
         )));
     }
-    if raw
-        .chars()
-        .any(|ch| !(ch.is_ascii_digit() || matches!(ch, '.' | ',' | '\'' | '-' | '+' | '(' | ')' | '$' | '\u{20ac}' | ' ' | '\u{a0}')))
-    {
+    if raw.chars().any(|ch| {
+        !(ch.is_ascii_digit()
+            || matches!(
+                ch,
+                '.' | ',' | '\'' | '-' | '+' | '(' | ')' | '$' | '\u{20ac}' | ' ' | '\u{a0}'
+            ))
+    }) {
         return Err(AppError::Validation(format!(
             "unsupported import amount `{value}`"
         )));
     }
 
     let decimal_separator = resolve_decimal_separator(&cleaned);
+    if decimal_separator.is_none() && has_bad_thousands_group(&cleaned) {
+        return Err(AppError::Validation(format!(
+            "unsupported import amount `{value}`"
+        )));
+    }
     let normalized = normalize_amount_string(&cleaned, decimal_separator)?;
     let amount_cents = parse_normalized_amount_to_cents(&normalized)?;
     Ok(if negative {
@@ -1029,12 +1047,9 @@ fn parse_csv_rows(plan: &CsvImportPlan) -> Result<Vec<ParsedImportRow>, AppError
                     CsvAmountStrategy::Signed { amount_column } => &amount_column.name,
                     CsvAmountStrategy::Split { .. } => unreachable!(),
                 };
-                let signed_amount = parse_import_amount_to_cents(required_csv_value(
-                    &record,
-                    amount_index,
-                    line_number,
-                    amount_label,
-                )?)?;
+                let raw_amount =
+                    required_csv_value(&record, amount_index, line_number, amount_label)?;
+                let signed_amount = parse_import_amount_to_cents(raw_amount)?;
                 if signed_amount == 0 {
                     return Err(AppError::Validation(format!(
                         "amount must be non-zero on CSV line {line_number}"
@@ -1051,6 +1066,21 @@ fn parse_csv_rows(plan: &CsvImportPlan) -> Result<Vec<ParsedImportRow>, AppError
                     return Err(AppError::Validation(format!(
                         "CSV import does not support transfer rows (line {line_number})"
                     )));
+                }
+                if let Some(row_kind) = row_type {
+                    if signed_amount < 0 && row_kind == TransactionKind::Income {
+                        return Err(AppError::Validation(format!(
+                            "CSV line {line_number} has a type/amount mismatch"
+                        )));
+                    }
+                    if signed_amount > 0
+                        && row_kind == TransactionKind::Expense
+                        && has_explicit_plus(raw_amount)
+                    {
+                        return Err(AppError::Validation(format!(
+                            "CSV line {line_number} has a type/amount mismatch"
+                        )));
+                    }
                 }
                 (kind, signed_amount.abs())
             }
@@ -1140,9 +1170,11 @@ fn parse_camt053_rows(
 
     let mut rows = Vec::new();
     let mut line_number = 1_usize;
+    let mut skipped = 0_usize;
     for statement in document.statement_root.statements {
         for entry in statement.entries {
             if entry.status.as_deref().map(str::trim) != Some("BOOK") {
+                skipped += 1;
                 continue;
             }
 
@@ -1213,6 +1245,13 @@ fn parse_camt053_rows(
                 line_number += 1;
             }
         }
+    }
+
+    if rows.is_empty() && skipped > 0 {
+        return Err(AppError::Validation(
+            "camt.053 file contains no booked entries; only non-BOOK entries were skipped"
+                .to_string(),
+        ));
     }
 
     Ok(rows)
@@ -1395,9 +1434,44 @@ fn resolve_decimal_separator(value: &str) -> Option<char> {
     }
 }
 
+fn has_bad_thousands_group(value: &str) -> bool {
+    if value.chars().filter(|ch| *ch == '.' || *ch == ',').count() != 1 {
+        return false;
+    }
+    let Some(pos) = value.rfind(['.', ',']) else {
+        return false;
+    };
+    let suffix_len = value.get(pos + 1..).map(|s| s.chars().count()).unwrap_or(0);
+    if suffix_len > 3 {
+        return true;
+    }
+    if suffix_len == 3 {
+        let whole = value.get(..pos).unwrap_or("");
+        if !whole.is_empty() && whole.chars().all(|ch| ch == '0') {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_explicit_plus(value: &str) -> bool {
+    let cleaned: String = value
+        .chars()
+        .filter(|ch| *ch != ' ' && *ch != '\u{a0}')
+        .collect();
+    let stripped = cleaned.strip_prefix('(').unwrap_or(&cleaned);
+    let stripped = stripped
+        .strip_prefix('$')
+        .or_else(|| stripped.strip_prefix('\u{20ac}'))
+        .unwrap_or(stripped);
+    stripped.starts_with('+')
+}
+
 fn looks_like_decimal_separator(value: &str, position: usize) -> bool {
-    let decimals = value.len().saturating_sub(position + 1);
-    (1..=2).contains(&decimals)
+    let Some(suffix) = value.get(position + 1..) else {
+        return false;
+    };
+    (1..=2).contains(&suffix.chars().count())
 }
 
 fn normalize_amount_string(
@@ -1451,7 +1525,10 @@ fn parse_normalized_amount_to_cents(value: &str) -> Result<i64, AppError> {
             )))
         }
     };
-    Ok(whole * 100 + cents)
+    whole
+        .checked_mul(100)
+        .and_then(|base| base.checked_add(cents))
+        .ok_or_else(|| AppError::Validation(format!("unsupported import amount `{value}`")))
 }
 
 enum CsvAmountIndexes {
@@ -1520,11 +1597,14 @@ struct CamtDateNode {
 
 impl CamtDateNode {
     fn to_iso_date(&self) -> Option<String> {
-        self.date
+        let raw = self
+            .date
             .as_deref()
             .or(self.date_time.as_deref())
-            .and_then(|value| value.get(..10))
-            .map(str::to_string)
+            .and_then(|value| value.get(..10))?;
+        NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .ok()
+            .map(|date| date.format("%Y-%m-%d").to_string())
     }
 }
 
@@ -1619,7 +1699,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        csv_mapping_defaults, import_preset_summaries, load_import_rows,
+        csv_mapping_defaults, has_explicit_plus, import_preset_summaries, load_import_rows,
         parse_import_amount_to_cents, resolve_camt053_import_plan, resolve_csv_import_plan,
         Camt053ImportRequest, CsvImportRequest,
     };
@@ -1787,6 +1867,40 @@ mod tests {
         assert!(parse_import_amount_to_cents("100.00 CR").is_err());
         assert!(parse_import_amount_to_cents("DR 100.00").is_err());
         assert!(parse_import_amount_to_cents("12-34").is_err());
+    }
+
+    #[test]
+    fn import_amount_parser_handles_euro_signs_without_panic() {
+        assert_eq!(parse_import_amount_to_cents("€-120.00").unwrap(), -12000);
+        assert_eq!(parse_import_amount_to_cents("€120.00").unwrap(), 12000);
+        assert_eq!(parse_import_amount_to_cents("(€25.00)").unwrap(), -2500);
+        assert!(parse_import_amount_to_cents("€").is_err());
+        assert!(parse_import_amount_to_cents("(").is_err());
+        assert!(parse_import_amount_to_cents("-").is_err());
+    }
+
+    #[test]
+    fn import_amount_parser_rejects_overflow() {
+        assert!(parse_import_amount_to_cents("99999999999999999.00").is_err());
+        assert_eq!(
+            parse_import_amount_to_cents("1.234.567").unwrap(),
+            123456700
+        );
+    }
+
+    #[test]
+    fn import_amount_parser_rejects_bad_thousands_group() {
+        assert!(parse_import_amount_to_cents("1,0000").is_err());
+        assert_eq!(parse_import_amount_to_cents("1,000").unwrap(), 100000);
+        assert!(parse_import_amount_to_cents("0.001").is_err());
+    }
+
+    #[test]
+    fn explicit_plus_flags_mismatch() {
+        assert!(has_explicit_plus("+10.00"));
+        assert!(has_explicit_plus("$+10.00"));
+        assert!(!has_explicit_plus("10.00"));
+        assert!(!has_explicit_plus("-10.00"));
     }
 
     #[test]

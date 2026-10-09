@@ -55,6 +55,7 @@ impl App {
 
     fn render_status_bar(&self, frame: &mut Frame<'_>, area: Rect) {
         let over_budget = self.budgets.iter().filter(|row| row.over_budget).count();
+        let month = self.summary.from.get(..7).unwrap_or("-");
         let line = Line::from(vec![
             Span::styled("HELIUS", tone_style(Tone::Header)),
             Span::raw("  "),
@@ -63,10 +64,7 @@ impl App {
                 tone_style(Tone::Muted),
             ),
             Span::raw("  "),
-            Span::styled(
-                format!("MONTH {}", &self.summary.from[..7]),
-                tone_style(Tone::Info),
-            ),
+            Span::styled(format!("MONTH {month}"), tone_style(Tone::Info)),
             Span::raw("  "),
             Span::styled(format!("CUR {}", self.currency), tone_style(Tone::Info)),
             Span::raw("  "),
@@ -85,10 +83,7 @@ impl App {
             ),
             Span::raw("  "),
             Span::styled(
-                format!(
-                    "UNRECONCILED {}",
-                    self.db.unreconciled_account_count().unwrap_or_default()
-                ),
+                format!("UNRECONCILED {}", self.unreconciled_count),
                 tone_style(Tone::Primary),
             ),
         ]);
@@ -1446,7 +1441,10 @@ impl App {
                 ListItem::new(Line::from(Span::styled(
                     format!(
                         "{} {: <8} {: >10} {}",
-                        &transaction.txn_date[5..],
+                        transaction
+                            .txn_date
+                            .get(5..)
+                            .unwrap_or(&transaction.txn_date),
                         transaction.kind.as_db_str(),
                         format_cents(match transaction.kind {
                             TransactionKind::Expense => -transaction.amount_cents,
@@ -1623,7 +1621,7 @@ impl App {
             lines.push(Line::from(Span::styled(
                 format!(
                     "NEXT DUE {} {}",
-                    &next_due.due_on[5..],
+                    next_due.due_on.get(5..).unwrap_or(&next_due.due_on),
                     truncate_label(&next_due.rule_name, 11)
                 ),
                 tone_style(Tone::Warning),
@@ -2700,7 +2698,13 @@ fn planning_weekly_projection_points(
     let anchor_opening = actual_history
         .last()
         .map(|point| point.opening_balance_cents)
-        .unwrap_or_else(|| snapshot.daily[0].opening_balance_cents);
+        .or_else(|| {
+            snapshot
+                .daily
+                .first()
+                .map(|point| point.opening_balance_cents)
+        })
+        .unwrap_or(0);
     points.push((anchor_index as f64, anchor_opening as f64));
 
     let mut last_week = anchor_week;
@@ -2858,7 +2862,10 @@ fn short_month(month: &str) -> String {
         .split('-')
         .nth(1)
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(1);
+        .filter(|value| (1..=12).contains(value));
+    let Some(month_num) = month_num else {
+        return "-".to_string();
+    };
     let names = [
         "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
     ];
@@ -2905,7 +2912,7 @@ mod tests {
 
     use super::{
         first_negative_forecast_date, highest_forecast_balance, lowest_forecast_balance,
-        planning_chart_data, planning_weekly_projection_points,
+        planning_chart_data, planning_weekly_projection_points, short_month,
     };
 
     fn sample_snapshot() -> ForecastSnapshot {
@@ -3060,6 +3067,35 @@ mod tests {
             first_negative_forecast_date(&snapshot).as_deref(),
             Some("2026-03-17")
         );
+    }
+
+    #[test]
+    fn short_month_rejects_bad_input() {
+        assert_eq!(short_month("2026-03"), "MAR");
+        assert_eq!(short_month("bad"), "-");
+        assert_eq!(short_month("2026-13"), "-");
+    }
+
+    #[test]
+    fn weekly_projection_handles_empty_inputs() {
+        let empty = ForecastSnapshot {
+            scenario: ForecastSelection {
+                id: None,
+                name: None,
+            },
+            as_of: "2026-03-16".to_string(),
+            account: ForecastSelection {
+                id: None,
+                name: None,
+            },
+            warnings: Vec::new(),
+            alerts: Vec::new(),
+            daily: Vec::new(),
+            monthly: Vec::new(),
+            goal_status: Vec::new(),
+            bill_calendar: Vec::new(),
+        };
+        assert!(planning_weekly_projection_points(&[], &empty).is_empty());
     }
 }
 // SPDX-License-Identifier: AGPL-3.0-only

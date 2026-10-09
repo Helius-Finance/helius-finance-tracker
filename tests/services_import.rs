@@ -179,3 +179,51 @@ fn preview_of_empty_camt053_returns_zero_rows() {
     assert_eq!(result.imported_count, 0);
     assert_eq!(count_transactions(&db), 0);
 }
+
+#[test]
+fn commit_rejects_changed_file_after_preview() {
+    use std::io::Write;
+    let (_guard, db) = fresh_db();
+    seed_checking(&db);
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    let path = temp.path().to_path_buf();
+    {
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "Date,Amount,Type,Description").unwrap();
+        writeln!(file, "2026-03-01,10.00,expense,Coffee").unwrap();
+    }
+    let request = CsvImportRequest {
+        path: path.clone(),
+        account: "Checking".to_string(),
+        preset_id: None,
+        date_column: None,
+        amount_column: Some("Amount".to_string()),
+        debit_column: None,
+        credit_column: None,
+        description_column: None,
+        category_column: None,
+        category: None,
+        income_category: None,
+        expense_category: Some("Uncategorized Expense".to_string()),
+        payee_column: None,
+        note_column: None,
+        type_column: Some("Type".to_string()),
+        default_kind: None,
+        date_format: None,
+        delimiter: None,
+        dry_run: true,
+        allow_duplicates: false,
+    };
+    let service = ImportService::new(&db);
+    let preview = service
+        .preview(ImportRequest::Csv(Box::new(request)))
+        .expect("preview");
+    {
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "Date,Amount,Type,Description").unwrap();
+        writeln!(file, "2026-03-01,10.00,expense,Coffee").unwrap();
+        writeln!(file, "2026-03-02,20.00,expense,Tea").unwrap();
+    }
+    let error = service.commit(preview).unwrap_err();
+    assert!(error.to_string().contains("changed since preview"));
+}

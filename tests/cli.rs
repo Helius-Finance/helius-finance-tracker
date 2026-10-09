@@ -2451,10 +2451,7 @@ fn csv_import_preserves_sign_for_trailing_and_symbol_after_minus_amounts() {
     assert_eq!(rent["kind"], "expense", "trailing minus is a debit");
     assert_eq!(rent["amount_cents"], 150000);
     let groceries = by_payee("Groceries sign after symbol");
-    assert_eq!(
-        groceries["kind"], "expense",
-        "sign after symbol is a debit"
-    );
+    assert_eq!(groceries["kind"], "expense", "sign after symbol is a debit");
     assert_eq!(groceries["amount_cents"], 12000);
 }
 
@@ -2576,5 +2573,511 @@ fn camt053_import_rejects_currency_mismatch() {
         ],
     );
     assert!(error.contains("currency mismatch"));
+}
+
+#[test]
+fn tx_list_search_treats_percent_as_literal() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+    run_ok(
+        &temp_dir,
+        &[
+            "tx",
+            "add",
+            "--type",
+            "expense",
+            "--amount",
+            "10.00",
+            "--date",
+            "2026-03-02",
+            "--account",
+            "Checking",
+            "--category",
+            "Groceries",
+            "--payee",
+            "100% Market",
+        ],
+    );
+    let out = run_ok(&temp_dir, &["tx", "list", "--search", "%", "--json"]);
+    let rows: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn csv_export_replaces_destination_and_keeps_sibling_files() {
+    let dir = TempDir::new().unwrap();
+    seed_basic_data(&dir);
+    for kind in ["transactions", "summary"] {
+        for extension in ["csv", "tmp"] {
+            let output = dir.path().join(format!("{kind}.{extension}"));
+            let sibling = dir.path().join(format!("{kind}.tmp"));
+            fs::write(&sibling, "unrelated content").unwrap();
+            fs::write(&output, "previous export").unwrap();
+            run_ok(
+                &dir,
+                &[
+                    "export",
+                    "csv",
+                    "--kind",
+                    kind,
+                    "--output",
+                    output.to_str().unwrap(),
+                    "--month",
+                    "2026-02",
+                ],
+            );
+            assert!(
+                fs::read_to_string(&output)
+                    .unwrap()
+                    .contains("amount_cents")
+                    || kind == "summary"
+            );
+            assert_ne!(fs::read_to_string(&output).unwrap(), "previous export");
+            if extension != "tmp" {
+                assert_eq!(fs::read_to_string(&sibling).unwrap(), "unrelated content");
+            }
+        }
+        let output = dir.path().join(format!("{kind}-directory.csv"));
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("keep"), "preserve me").unwrap();
+        let before = fs::read_dir(dir.path()).unwrap().count();
+        run_err(
+            &dir,
+            &[
+                "export",
+                "csv",
+                "--kind",
+                kind,
+                "--output",
+                output.to_str().unwrap(),
+                "--month",
+                "2026-02",
+            ],
+        );
+        assert_eq!(
+            fs::read_to_string(output.join("keep")).unwrap(),
+            "preserve me"
+        );
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            before,
+            "failed export must clean its staging file"
+        );
+    }
+}
+
+#[test]
+fn csv_split_import_accepts_zero_or_empty_unused_side() {
+    let dir = TempDir::new().unwrap();
+    run_ok(&dir, &["init", "--currency", "EUR"]);
+    run_ok(&dir, &["account", "add", "Checking", "--type", "checking"]);
+    let input = dir.path().join("split.csv");
+    fs::write(
+        &input,
+        "Date,Debit,Credit,Description\n\
+         2026-03-01,10.00,0.00,Debit zero\n\
+         2026-03-02,0.00,20.00,Credit zero\n\
+         2026-03-03,30.00,,Debit empty\n\
+         2026-03-04,,40.00,Credit empty\n\
+         2026-03-05,-50.00,,Debit negative\n\
+         2026-03-06,,-60.00,Credit negative\n",
+    )
+    .unwrap();
+    let args = [
+        "import",
+        "csv",
+        "--input",
+        input.to_str().unwrap(),
+        "--account",
+        "Checking",
+        "--date-column",
+        "Date",
+        "--debit-column",
+        "Debit",
+        "--credit-column",
+        "Credit",
+        "--description-column",
+        "Description",
+        "--json",
+    ];
+    let result: Value = serde_json::from_str(&run_ok(&dir, &args)).unwrap();
+    assert_eq!(result["imported_count"], 6);
+    let rows = transaction_map(&dir);
+    for (payee, kind, amount) in [
+        ("Debit zero", "expense", 1000),
+        ("Credit zero", "income", 2000),
+        ("Debit empty", "expense", 3000),
+        ("Credit empty", "income", 4000),
+        ("Debit negative", "expense", 5000),
+        ("Credit negative", "income", 6000),
+    ] {
+        let row = rows.iter().find(|r| r["payee"] == payee).unwrap();
+        assert_eq!(row["kind"], kind);
+        assert_eq!(row["amount_cents"], amount);
+    }
+    for (debit, credit) in [("0", "0"), ("", ""), ("1", "1")] {
+        fs::write(
+            &input,
+            format!("Date,Debit,Credit,Description\n2026-03-07,{debit},{credit},Invalid\n"),
+        )
+        .unwrap();
+        run_err(&dir, &args);
+        assert_eq!(transaction_map(&dir).len(), 6);
+    }
+}
+
+#[test]
+fn csv_import_keeps_categories_that_differ_by_non_ascii_case() {
+    let dir = TempDir::new().unwrap();
+    run_ok(&dir, &["init", "--currency", "EUR"]);
+    run_ok(&dir, &["account", "add", "Checking", "--type", "checking"]);
+    for name in ["Ä", "ä", "Food"] {
+        run_ok(&dir, &["category", "add", name, "--kind", "expense"]);
+    }
+    let input = dir.path().join("categories.csv");
+    fs::write(
+        &input,
+        "Date,Amount,Category,Description\n\
+         2026-03-01,-1.00,Ä,Upper\n\
+         2026-03-02,-2.00,ä,Lower\n\
+         2026-03-03,-3.00,Food,Ascii upper\n\
+         2026-03-04,-4.00,food,Ascii lower\n",
+    )
+    .unwrap();
+    run_ok(
+        &dir,
+        &[
+            "import",
+            "csv",
+            "--input",
+            input.to_str().unwrap(),
+            "--account",
+            "Checking",
+            "--category-column",
+            "Category",
+        ],
+    );
+    let rows = transaction_map(&dir);
+    for (payee, category) in [
+        ("Upper", "Ä"),
+        ("Lower", "ä"),
+        ("Ascii upper", "Food"),
+        ("Ascii lower", "Food"),
+    ] {
+        let row = rows.iter().find(|r| r["payee"] == payee).unwrap();
+        assert_eq!(row["category_name"], category);
+    }
+}
+
+#[test]
+fn tx_list_rejects_zero_limit() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+    let error = run_err(&temp_dir, &["tx", "list", "--limit", "0"]);
+    assert!(error.contains("limit must be"));
+}
+
+#[test]
+fn summary_range_rejects_inverted_dates() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+    let error = run_err(
+        &temp_dir,
+        &[
+            "summary",
+            "range",
+            "--from",
+            "2026-03-10",
+            "--to",
+            "2026-03-01",
+        ],
+    );
+    assert!(error.contains("on or before"));
+}
+
+#[test]
+fn forecast_rejects_out_of_range_days() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+    let error = run_err(&temp_dir, &["forecast", "show", "--days", "0"]);
+    assert!(error.contains("between 1 and 365"));
+}
+
+#[test]
+fn recurring_rejects_huge_interval() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+    let error = run_err(
+        &temp_dir,
+        &[
+            "recurring",
+            "add",
+            "Big Rent",
+            "--type",
+            "expense",
+            "--amount",
+            "10.00",
+            "--account",
+            "Checking",
+            "--category",
+            "Groceries",
+            "--cadence",
+            "monthly",
+            "--interval",
+            "5000",
+            "--day-of-month",
+            "1",
+            "--start-on",
+            "2026-03-01",
+        ],
+    );
+    assert!(error.contains("between 1 and 1000"));
+}
+
+#[test]
+fn tx_list_rejects_inverted_dates() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+    let error = run_err(
+        &temp_dir,
+        &["tx", "list", "--from", "2026-03-10", "--to", "2026-03-01"],
+    );
+    assert!(error.contains("on or before"));
+}
+
+#[test]
+fn csv_import_rejects_negative_amount_with_income_type() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+    let csv_path = temp_dir.path().join("mismatch.csv");
+    fs::write(
+        &csv_path,
+        "Date,Amount,Type,Description\n2026-03-01,-10.00,income,Coffee\n",
+    )
+    .unwrap();
+    let error = run_err(
+        &temp_dir,
+        &[
+            "import",
+            "csv",
+            "--input",
+            csv_path.to_str().unwrap(),
+            "--account",
+            "Checking",
+            "--amount-column",
+            "Amount",
+            "--date-column",
+            "Date",
+            "--description-column",
+            "Description",
+            "--type-column",
+            "Type",
+            "--expense-category",
+            "Groceries",
+        ],
+    );
+    assert!(error.contains("type/amount mismatch"));
+}
+
+#[test]
+fn csv_import_rejects_split_with_default_type() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+    let csv_path = temp_dir.path().join("split-default.csv");
+    fs::write(
+        &csv_path,
+        "Date,Debit,Credit,Description\n2026-03-01,10.00,,Coffee\n",
+    )
+    .unwrap();
+    let error = run_err(
+        &temp_dir,
+        &[
+            "import",
+            "csv",
+            "--input",
+            csv_path.to_str().unwrap(),
+            "--account",
+            "Checking",
+            "--debit-column",
+            "Debit",
+            "--credit-column",
+            "Credit",
+            "--date-column",
+            "Date",
+            "--description-column",
+            "Description",
+            "--default-type",
+            "income",
+        ],
+    );
+    assert!(error.contains("default type cannot be used"));
+}
+
+#[test]
+fn csv_import_default_type_applies_regardless_of_sign() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+    let csv_path = temp_dir.path().join("income.csv");
+    fs::write(
+        &csv_path,
+        "Date,Amount,Description\n\
+         2026-03-01,-10.00,Refund\n\
+         2026-03-02,25.00,Salary\n",
+    )
+    .unwrap();
+    run_ok(
+        &temp_dir,
+        &[
+            "import",
+            "csv",
+            "--input",
+            csv_path.to_str().unwrap(),
+            "--account",
+            "Checking",
+            "--default-type",
+            "income",
+        ],
+    );
+    let rows = transaction_map(&temp_dir);
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row["kind"] == "income"));
+}
+
+#[test]
+fn csv_import_duplicate_check_is_case_sensitive() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_import_db(&temp_dir);
+    for (index, payee) in ["Coffee", "COFFEE"].into_iter().enumerate() {
+        let csv_path = temp_dir.path().join(format!("statement-{index}.csv"));
+        fs::write(
+            &csv_path,
+            format!("Date,Amount,Description\n2026-03-01,-4.50,{payee}\n"),
+        )
+        .unwrap();
+        let result: Value = serde_json::from_str(&run_ok(
+            &temp_dir,
+            &[
+                "import",
+                "csv",
+                "--input",
+                csv_path.to_str().unwrap(),
+                "--account",
+                "Checking",
+                "--json",
+            ],
+        ))
+        .unwrap();
+        assert_eq!(result["imported_count"], 1, "{payee} is not a duplicate");
+    }
+}
+
+#[test]
+fn second_reconciliation_includes_previously_cleared() {
+    let temp_dir = TempDir::new().unwrap();
+    seed_basic_data(&temp_dir);
+    let first_ids: Vec<String> = transaction_map(&temp_dir)
+        .iter()
+        .filter(|tx| tx["account_name"] == "Checking")
+        .map(|tx| tx["id"].as_i64().unwrap().to_string())
+        .collect();
+    let mut first_args = vec![
+        "reconcile",
+        "start",
+        "--account",
+        "Checking",
+        "--to",
+        "2026-02-12",
+        "--statement-balance",
+        "3174.60",
+    ];
+    for id in &first_ids {
+        first_args.push("--transaction-id");
+        first_args.push(id);
+    }
+    run_ok(&temp_dir, &first_args);
+
+    run_ok(
+        &temp_dir,
+        &[
+            "tx",
+            "add",
+            "--type",
+            "expense",
+            "--amount",
+            "10.00",
+            "--date",
+            "2026-02-13",
+            "--account",
+            "Checking",
+            "--category",
+            "Groceries",
+        ],
+    );
+    let second_ids: Vec<String> = transaction_map(&temp_dir)
+        .iter()
+        .filter(|tx| tx["reconciliation_id"].is_null() && tx["account_name"] == "Checking")
+        .map(|tx| tx["id"].as_i64().unwrap().to_string())
+        .collect();
+    assert!(!second_ids.is_empty());
+    let mut second_args = vec![
+        "reconcile",
+        "start",
+        "--account",
+        "Checking",
+        "--to",
+        "2026-02-13",
+        "--statement-balance",
+        "3164.60",
+    ];
+    for id in &second_ids {
+        second_args.push("--transaction-id");
+        second_args.push(id);
+    }
+    run_ok(&temp_dir, &second_args);
+}
+
+#[test]
+fn reconcile_accepts_negative_statement_balance() {
+    let temp_dir = TempDir::new().unwrap();
+    run_ok(&temp_dir, &["init", "--currency", "USD"]);
+    run_ok(&temp_dir, &["account", "add", "Cash", "--type", "cash"]);
+    run_ok(&temp_dir, &["category", "add", "Fees", "--kind", "expense"]);
+    run_ok(
+        &temp_dir,
+        &[
+            "tx",
+            "add",
+            "--type",
+            "expense",
+            "--amount",
+            "5.00",
+            "--date",
+            "2026-03-01",
+            "--account",
+            "Cash",
+            "--category",
+            "Fees",
+        ],
+    );
+    let ids: Vec<String> = transaction_map(&temp_dir)
+        .iter()
+        .map(|tx| tx["id"].as_i64().unwrap().to_string())
+        .collect();
+    // Opening balance 0 minus a 5.00 expense leaves a negative statement balance.
+    let mut args = vec![
+        "reconcile",
+        "start",
+        "--account",
+        "Cash",
+        "--to",
+        "2026-03-01",
+        "--statement-balance",
+        "-5.00",
+    ];
+    for id in &ids {
+        args.push("--transaction-id");
+        args.push(id);
+    }
+    run_ok(&temp_dir, &args);
 }
 // SPDX-License-Identifier: AGPL-3.0-only

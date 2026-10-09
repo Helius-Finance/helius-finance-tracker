@@ -22,7 +22,8 @@ use crate::model::{
     UpdatePlanningScenario, UpdateRecurringRule, UpdateTransaction, Weekday, WeeklyBalancePoint,
 };
 use crate::services::import::{
-    Camt053ImportRequest, CsvImportRequest, ImportPreview, ImportRequest, ImportService,
+    Camt053ImportRequest, CsvImportRequest, FileFingerprint, ImportPreview, ImportRequest,
+    ImportService,
 };
 use crate::today_iso;
 
@@ -176,6 +177,7 @@ pub(super) struct ReconcileSelectionState {
     pub(super) statement_ending_on: String,
     pub(super) statement_balance_cents: i64,
     pub(super) opening_balance_cents: i64,
+    pub(super) previously_cleared_cents: i64,
     pub(super) eligible_transactions: Vec<TransactionRecord>,
     pub(super) selected_ids: HashSet<i64>,
     pub(super) active: usize,
@@ -188,6 +190,7 @@ impl ReconcileSelectionState {
 
     pub(super) fn selected_balance_cents(&self) -> i64 {
         self.opening_balance_cents
+            + self.previously_cleared_cents
             + self
                 .eligible_transactions
                 .iter()
@@ -205,6 +208,7 @@ impl ReconcileSelectionState {
 pub(super) struct ImportReviewState {
     pub(super) plan: ImportPlan,
     pub(super) preview: ImportResult,
+    pub(super) fingerprint: FileFingerprint,
     pub(super) active: usize,
 }
 
@@ -251,6 +255,7 @@ pub(super) struct App {
     pub(super) recurring_rules: Vec<RecurringRuleRecord>,
     pub(super) due_occurrences: Vec<RecurringOccurrenceRecord>,
     pub(super) reconciliations: Vec<ReconciliationRecord>,
+    pub(super) unreconciled_count: i64,
     pub(super) show_help: bool,
     pub(super) input_mode: bool,
     pub(super) input_buffer: String,
@@ -303,6 +308,7 @@ impl App {
             recurring_rules: Vec::new(),
             due_occurrences: Vec::new(),
             reconciliations: Vec::new(),
+            unreconciled_count: 0,
             show_help: true,
             input_mode: false,
             input_buffer: String::new(),
@@ -402,6 +408,7 @@ impl App {
         }
         self.reconciliations =
             crate::services::reconciliation::ReconciliationService::new(&self.db).list(None)?;
+        self.unreconciled_count = self.db.unreconciled_account_count().unwrap_or(0);
         self.clamp_indices();
         Ok(())
     }
@@ -2442,7 +2449,7 @@ impl App {
     }
 
     fn save_transaction_filters(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
-        self.tx_filters = TransactionFilters {
+        let filters = TransactionFilters {
             from: optional_field(form, 0)
                 .map(|value| normalize_date_input(&value))
                 .transpose()?,
@@ -2455,11 +2462,12 @@ impl App {
             limit: parse_optional_limit(optional_field(form, 5), "LIMIT")?,
             include_deleted: parse_yes_no(form_value(form, 6), "INCLUDE DELETED")?,
         };
+        let count = crate::services::transactions::TransactionService::new(&self.db)
+            .list(&filters)?
+            .len();
+        self.tx_filters = filters;
         Ok(FormOutcome::Refresh(format!(
-            "Applied transaction filters. Loaded {} rows.",
-            crate::services::transactions::TransactionService::new(&self.db)
-                .list(&self.tx_filters)?
-                .len()
+            "Applied transaction filters. Loaded {count} rows."
         )))
     }
 
@@ -2522,6 +2530,7 @@ impl App {
         let preview = ImportPreview {
             plan: review.plan,
             result: review.preview,
+            fingerprint: review.fingerprint,
         };
         let result = ImportService::new(&self.db).commit(preview)?;
         self.import_review = None;
@@ -2556,7 +2565,7 @@ impl App {
             payee: optional_field(form, 6),
             note: optional_field(form, 7),
             cadence: Some(cadence),
-            interval: Some(parse_positive_i64(form_value(form, 9), "INTERVAL")?),
+            interval: Some(parse_interval(form_value(form, 9))?),
             day_of_month,
             weekday,
             start_on: Some(normalize_date_input(form_value(form, 12))?),
@@ -2585,7 +2594,7 @@ impl App {
     fn start_reconciliation_review(&mut self, form: &FormState) -> Result<FormOutcome, AppError> {
         let account_ref = form_value(form, 0).trim().to_string();
         let statement_ending_on = normalize_date_input(form_value(form, 1))?;
-        let statement_balance_cents = parse_amount_to_cents(form_value(form, 2))?;
+        let statement_balance_cents = parse_balance_to_cents(form_value(form, 2))?;
         let eligible = self
             .db
             .list_eligible_reconciliation_transactions(&account_ref, &statement_ending_on)?;
@@ -2599,12 +2608,16 @@ impl App {
                 "selected reconciliation account could not be resolved".to_string(),
             )
         })?;
+        let previously_cleared_cents = self
+            .db
+            .reconciled_delta_cents(account.id, &statement_ending_on)?;
         let flow = ReconcileSelectionState {
             account_id: account.id,
             account_name: account.name.clone(),
             statement_ending_on,
             statement_balance_cents,
             opening_balance_cents: account.opening_balance_cents,
+            previously_cleared_cents,
             selected_ids: eligible.iter().map(|transaction| transaction.id).collect(),
             eligible_transactions: eligible,
             active: 0,
@@ -2762,12 +2775,17 @@ impl App {
     }
 
     pub(super) fn command_bar_text(&self) -> String {
+        // Status comes before the key hints so narrow terminals cut the hints, not the error.
         if self.reconcile_flow.is_some() {
-            String::from(
-                "RECONCILE MODE | Space: toggle | A: all | C: clear | Ctrl+S/F2: save | Esc: cancel",
+            format!(
+                "RECONCILE MODE | {} | Space: toggle | A: all | C: clear | Ctrl+S/F2: save | Esc: cancel",
+                self.status
             )
         } else if self.import_review.is_some() {
-            String::from("IMPORT PREVIEW | Up/Down: browse | Ctrl+S/F2: import | Esc: cancel")
+            format!(
+                "IMPORT PREVIEW | {} | Up/Down: browse | Ctrl+S/F2: import | Esc: cancel",
+                self.status
+            )
         } else if self.form.is_some() {
             String::from(
                 "FORM MODE | Type: replace field | Tab: next | Enter/Ctrl+S/F2: save | Esc: cancel",
@@ -2892,6 +2910,7 @@ fn review_state_from_preview(preview: ImportPreview) -> ImportReviewState {
     ImportReviewState {
         plan: preview.plan,
         preview: preview.result,
+        fingerprint: preview.fingerprint,
         active: 0,
     }
 }
@@ -2907,7 +2926,7 @@ fn build_new_recurring_rule(form: &FormState) -> Result<NewRecurringRule, AppErr
         payee: optional_field(form, 6),
         note: optional_field(form, 7),
         cadence,
-        interval: parse_positive_i64(form_value(form, 9), "INTERVAL")?,
+        interval: parse_interval(form_value(form, 9))?,
         day_of_month: match cadence {
             RecurringCadence::Monthly => parse_optional_u32(optional_field(form, 10))?,
             RecurringCadence::Weekly => None,
@@ -2957,11 +2976,29 @@ fn parse_positive_i64(raw: &str, label: &str) -> Result<i64, AppError> {
     Ok(parsed)
 }
 
+fn parse_interval(raw: &str) -> Result<i64, AppError> {
+    let parsed = parse_positive_i64(raw, "INTERVAL")?;
+    if parsed > 1000 {
+        return Err(AppError::Validation(
+            "recurring interval must be between 1 and 1000".to_string(),
+        ));
+    }
+    Ok(parsed)
+}
+
 fn parse_optional_u32(raw: Option<String>) -> Result<Option<u32>, AppError> {
     match raw {
-        Some(value) => value.trim().parse::<u32>().map(Some).map_err(|_| {
-            AppError::Validation("DAY OF MONTH must be a number between 1 and 28".to_string())
-        }),
+        Some(value) => {
+            let parsed = value.trim().parse::<u32>().map_err(|_| {
+                AppError::Validation("DAY OF MONTH must be a number between 1 and 28".to_string())
+            })?;
+            if !(1..=28).contains(&parsed) {
+                return Err(AppError::Validation(
+                    "DAY OF MONTH must be a number between 1 and 28".to_string(),
+                ));
+            }
+            Ok(Some(parsed))
+        }
         None => Ok(None),
     }
 }
@@ -3175,11 +3212,13 @@ fn transaction_effect_for_account(account_id: i64, transaction: &TransactionReco
 mod tests {
     use super::{
         apply_form_backspace, apply_form_text_input, build_new_recurring_rule, is_form_submit_key,
-        normalize_input_command_tokens, should_handle_key_event, App, FormField, FormKind,
-        FormState, View,
+        normalize_input_command_tokens, parse_interval, parse_optional_u32,
+        review_state_from_preview, should_handle_key_event, App, FormField, FormKind, FormState,
+        ReconcileSelectionState, View,
     };
     use crate::db::Db;
-    use crate::model::RecurringCadence;
+    use crate::model::{AccountKind, RecurringCadence};
+    use crate::services::import::{CsvImportRequest, ImportRequest, ImportService};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use tempfile::TempDir;
 
@@ -3467,6 +3506,104 @@ mod tests {
             ]),
             vec!["forecast".to_string(), "show".to_string()]
         );
+    }
+
+    #[test]
+    fn day_of_month_is_bounded() {
+        assert!(parse_optional_u32(None).unwrap().is_none());
+        assert_eq!(
+            parse_optional_u32(Some("15".to_string())).unwrap(),
+            Some(15)
+        );
+        assert!(parse_optional_u32(Some("0".to_string())).is_err());
+        assert!(parse_optional_u32(Some("29".to_string())).is_err());
+    }
+
+    #[test]
+    fn interval_is_bounded() {
+        assert_eq!(parse_interval("1").unwrap(), 1);
+        assert!(parse_interval("0").is_err());
+        assert!(parse_interval("5000").is_err());
+    }
+
+    #[test]
+    fn import_review_shows_rejection_when_file_changed_after_preview() {
+        let (temp_dir, mut app) = test_app();
+        app.db
+            .add_account("Checking", &AccountKind::Checking, 0, "2026-01-01")
+            .unwrap();
+        let csv_path = temp_dir.path().join("statement.csv");
+        std::fs::write(
+            &csv_path,
+            "Date,Amount,Description\n2026-03-10,-12.99,Taxi\n",
+        )
+        .unwrap();
+        let preview = ImportService::new(&app.db)
+            .preview(ImportRequest::Csv(Box::new(CsvImportRequest {
+                path: csv_path.clone(),
+                account: "Checking".to_string(),
+                preset_id: None,
+                date_column: Some("Date".to_string()),
+                amount_column: Some("Amount".to_string()),
+                debit_column: None,
+                credit_column: None,
+                description_column: Some("Description".to_string()),
+                category_column: None,
+                category: None,
+                income_category: None,
+                expense_category: None,
+                payee_column: None,
+                note_column: None,
+                type_column: None,
+                default_kind: None,
+                date_format: None,
+                delimiter: None,
+                dry_run: true,
+                allow_duplicates: false,
+            })))
+            .unwrap();
+        app.import_review = Some(review_state_from_preview(preview));
+        std::fs::write(
+            &csv_path,
+            "Date,Amount,Description\n2026-03-10,-12.99,Bus\n",
+        )
+        .unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert!(app.import_review.is_some());
+        assert!(app
+            .command_bar_text()
+            .contains("import file changed since preview"));
+    }
+
+    #[test]
+    fn reconcile_review_shows_save_rejection() {
+        let (_temp_dir, mut app) = test_app();
+        let account_id = app
+            .db
+            .add_account("Checking", &AccountKind::Checking, 0, "2026-01-01")
+            .unwrap();
+        app.reconcile_flow = Some(ReconcileSelectionState {
+            account_id,
+            account_name: "Checking".to_string(),
+            statement_ending_on: "2026-03-31".to_string(),
+            statement_balance_cents: 100,
+            opening_balance_cents: 0,
+            previously_cleared_cents: 0,
+            eligible_transactions: Vec::new(),
+            selected_ids: Default::default(),
+            active: 0,
+        });
+
+        let status_before = app.status.clone();
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(app.reconcile_flow.is_some());
+        assert_ne!(app.status, status_before);
+        assert!(app.command_bar_text().contains(&app.status));
     }
 }
 // SPDX-License-Identifier: AGPL-3.0-only
