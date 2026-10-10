@@ -67,3 +67,52 @@ jobs:
       - name: Run Docker smoke flow
         shell: pwsh
         run: ./scripts/docker-smoke.ps1 -ImageTag "helius-ci"
+
+  install-sh:
+    name: install.sh
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Lint install.sh
+        run: shellcheck -s sh install.sh
+
+      - name: Install and upgrade the latest release
+        env:
+          HELIUS_INSTALL_DIR: ${{ runner.temp }}/helius-bin
+        run: |
+          sh install.sh
+          sh install.sh
+          "$HELIUS_INSTALL_DIR/helius" --version
+
+  install-ps1:
+    name: install.ps1 (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell:
+          - powershell
+          - pwsh
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install and upgrade the latest release
+        env:
+          HELIUS_INSTALL_DIR: ${{ runner.temp }}\helius-bin
+        run: |
+          Get-Content -Raw ./install.ps1 | Invoke-Expression
+          Get-Content -Raw ./install.ps1 | Invoke-Expression
+          & "$env:HELIUS_INSTALL_DIR\helius.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "helius.exe --version failed" }
+
+          $userPath = (Get-Item "HKCU:\Environment").GetValue("Path", "", "DoNotExpandEnvironmentNames")
+          $hits = @($userPath -split ";" | Where-Object { $_ -eq $env:HELIUS_INSTALL_DIR })
+          if ($hits.Count -ne 1) { throw "Expected one user PATH entry for $env:HELIUS_INSTALL_DIR, found $($hits.Count): $userPath" }

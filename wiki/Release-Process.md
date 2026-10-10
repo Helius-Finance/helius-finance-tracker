@@ -54,12 +54,25 @@ Each artifact includes:
 - `README.md`
 - a `.sha256.txt` checksum file alongside the archive
 
+## Install Scripts
+
+`install.sh` and `install.ps1` at the repository root power the one-command
+install. They find the latest tag through the
+`https://github.com/Helius-Finance/helius-finance-tracker/releases/latest`
+redirect, then download the archive and checksum named above. Renaming an
+artifact, its `.sha256.txt` file, or the top-level `helius/` directory inside
+the archive breaks the one-command install for every user.
+
+Users fetch the scripts from `main`, so a change to them ships as soon as it
+merges, not with the next tag. CI runs both scripts against the latest release.
+
 ## GitHub Actions
 
 After local verification is green, the GitHub workflows provide the supported
 platform confirmation:
 
-- `.github/workflows/ci.yml`: test, build, and smoke-check on Windows and Ubuntu
+- `.github/workflows/ci.yml`: test, build, and smoke-check on Windows and Ubuntu,
+  and run the install scripts against the latest release
 - `.github/workflows/release.yml`: package the release archives, smoke-check
   the packaged artifacts, and publish assets on a version tag
 
