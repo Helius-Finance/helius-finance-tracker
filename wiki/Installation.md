@@ -2,7 +2,53 @@
 
 Helius ships as a single executable on Windows and Linux. No separate database server or background service is required.
 
-## Option 1: Download A Release
+## Option 1: Install With One Command
+
+Linux x86_64:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Helius-Finance/helius-finance-tracker/main/install.sh | sh
+```
+
+Windows x86_64, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Helius-Finance/helius-finance-tracker/main/install.ps1 | iex
+```
+
+The installer:
+
+1. Finds the latest GitHub release.
+2. Downloads the archive for your platform and verifies its SHA-256 checksum.
+3. Checks that the binary runs on this machine.
+4. Installs it into `~/.local/bin/helius` on Linux or
+   `%LOCALAPPDATA%\Programs\Helius\helius.exe` on Windows.
+
+On Windows, the installer also adds the install folder to your user `PATH`. On
+Linux, it prints the line to add to your shell profile if `~/.local/bin` is not
+on `PATH` yet. Run the same command again to upgrade.
+
+Environment overrides:
+
+- `HELIUS_VERSION`: install a specific release tag, such as `v1.4.4`
+- `HELIUS_INSTALL_DIR`: install into a different folder
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Helius-Finance/helius-finance-tracker/main/install.sh | HELIUS_VERSION=v1.4.4 sh
+```
+
+```powershell
+$env:HELIUS_VERSION = "v1.4.4"; irm https://raw.githubusercontent.com/Helius-Finance/helius-finance-tracker/main/install.ps1 | iex
+```
+
+The Linux binary needs glibc 2.34 or newer. On older distributions or
+musl-based systems such as Alpine, use Docker or build from source.
+
+To uninstall, delete the installed binary. On Windows, also remove the folder
+from your user `PATH`. Your database is stored separately and is not removed;
+see [Data and Storage](Data-and-Storage).
+
+## Option 2: Download A Release
 
 1. Open the [GitHub Releases](https://github.com/STVR393/helius-personal-finance-tracker/releases) page.
 2. Download the latest archive for your platform.
@@ -15,7 +61,7 @@ helius --help
 
 If you want to start Helius from any terminal, add that folder to your `PATH`.
 
-## Option 2: Build From Source
+## Option 3: Build From Source
 
 Requirements:
 
@@ -35,7 +81,7 @@ target\release\helius.exe
 target/release/helius
 ```
 
-## Option 3: Install From A Local Checkout
+## Option 4: Install From A Local Checkout
 
 If you want Cargo to install the command into your Cargo bin directory:
 
@@ -43,7 +89,7 @@ If you want Cargo to install the command into your Cargo bin directory:
 cargo install --path .
 ```
 
-## Option 4: Run In Docker
+## Option 5: Run In Docker
 
 Docker is optional. The container stores the database at `/data/tracker.db`, so
 mount `/data` if you want the data to persist.

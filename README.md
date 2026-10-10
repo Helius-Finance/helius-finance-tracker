@@ -22,7 +22,35 @@ Supported targets: Windows x86_64 and Linux x86_64.
 
 ## Installation
 
-### Option 1: Download a release binary
+### Option 1: Install with one command
+
+Linux x86_64:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Helius-Finance/helius-finance-tracker/main/install.sh | sh
+```
+
+Windows x86_64, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Helius-Finance/helius-finance-tracker/main/install.ps1 | iex
+```
+
+The installer downloads the latest release, verifies its SHA-256 checksum, and installs `helius` into `~/.local/bin` on Linux or `%LOCALAPPDATA%\Programs\Helius` on Windows. The Windows installer also adds that folder to your user `PATH`. Run the same command again to upgrade.
+
+To install a specific release or use a different folder, set `HELIUS_VERSION` or `HELIUS_INSTALL_DIR`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Helius-Finance/helius-finance-tracker/main/install.sh | HELIUS_VERSION=v1.4.4 sh
+```
+
+```powershell
+$env:HELIUS_VERSION = "v1.4.4"; irm https://raw.githubusercontent.com/Helius-Finance/helius-finance-tracker/main/install.ps1 | iex
+```
+
+The Linux binary needs glibc 2.34 or newer. On older distributions or musl-based systems such as Alpine, use Docker or build from source.
+
+### Option 2: Download a release binary
 
 1. Open the [GitHub Releases](https://github.com/STVR393/helius-personal-finance-tracker/releases) page.
 2. Download the archive for your platform:
@@ -41,7 +69,7 @@ Supported targets: Windows x86_64 and Linux x86_64.
 
 On first run, if no database exists, Helius prompts for a 3-letter currency code and initializes the default database for the current platform.
 
-### Option 2: Build from source
+### Option 3: Build from source
 
 Requirements:
 
@@ -61,13 +89,13 @@ target\release\helius.exe
 target/release/helius
 ```
 
-### Option 3: Install from a checkout
+### Option 4: Install from a checkout
 
 ```powershell
 cargo install --path .
 ```
 
-### Option 4: Run in Docker
+### Option 5: Run in Docker
 
 The container stores its database at `/data/tracker.db`.
 
